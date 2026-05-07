@@ -20,6 +20,9 @@ test -f Assets/AppIconSource.png
 sips -g pixelWidth -g pixelHeight Assets/AppIconSource.png | grep -q "pixelWidth: 1024"
 sips -g pixelWidth -g pixelHeight Assets/AppIconSource.png | grep -q "pixelHeight: 1024"
 
+echo "== Code signature =="
+codesign --verify --deep --strict --verbose=2 .build/release/DeepSeekBar.app
+
 echo "== DMG =="
 if [[ -f .build/release/DeepSeekBar.dmg ]]; then
   ls -lh .build/release/DeepSeekBar.dmg

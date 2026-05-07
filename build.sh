@@ -71,6 +71,9 @@ cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
+codesign --remove-signature "${APP_DIR}" 2>/dev/null || true
+codesign --force --deep --sign - "${APP_DIR}"
+
 echo ""
 echo "=== Creating DMG ==="
 rm -rf "${DMG_STAGE}"
