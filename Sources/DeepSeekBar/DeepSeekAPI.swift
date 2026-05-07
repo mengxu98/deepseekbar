@@ -1,6 +1,6 @@
 import Foundation
 
-final class DeepSeekAPI {
+final class DeepSeekAPI: @unchecked Sendable {
     private let endpoint = URL(string: "https://api.deepseek.com/user/balance")!
     private let session: URLSession
 

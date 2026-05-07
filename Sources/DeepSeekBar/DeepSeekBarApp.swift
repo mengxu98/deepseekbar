@@ -472,7 +472,7 @@ final class AppViewModel: ObservableObject {
     private func scheduleTimer() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: TimeInterval(refreshIntervalMinutes * 60), repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.refresh()
             }
         }
@@ -935,6 +935,7 @@ struct ContentView: View {
     }
 }
 
+@MainActor
 private func modalHeader(_ title: String, subtitle: String) -> some View {
     VStack(alignment: .leading, spacing: 4) {
         Text(title)
@@ -946,12 +947,14 @@ private func modalHeader(_ title: String, subtitle: String) -> some View {
     }
 }
 
+@MainActor
 private func modalFieldLabel(_ title: String) -> some View {
     Text(title)
         .font(.system(size: 10, weight: .medium))
         .foregroundColor(.secondary)
 }
 
+@MainActor
 private func modalTextButton(_ title: String, action: @escaping () -> Void) -> some View {
     Button(action: action) {
         Text(title)
@@ -968,6 +971,7 @@ private func modalTextButton(_ title: String, action: @escaping () -> Void) -> s
     .focusable(false)
 }
 
+@MainActor
 private func modalPrimaryButton(_ title: String, action: @escaping () -> Void) -> some View {
     Button(action: action) {
         Text(title)
