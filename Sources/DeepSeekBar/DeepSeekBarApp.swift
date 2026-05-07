@@ -13,6 +13,10 @@ private enum PopoverSizing {
     }
 }
 
+private extension Color {
+    static let deepSeekBlue = Color(red: 0.10, green: 0.45, blue: 0.88)
+}
+
 @MainActor
 final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
@@ -722,7 +726,7 @@ struct ContentView: View {
                 .focusable(false)
                 .font(.system(size: 10, weight: .medium))
             }
-            usageRow("Today", used: viewModel.usage.todayUsed, budget: viewModel.usage.todayBudget, color: .green)
+            usageRow("Today", used: viewModel.usage.todayUsed, budget: viewModel.usage.todayBudget, color: .deepSeekBlue)
             usageRow("This Month", used: viewModel.usage.monthUsed, budget: viewModel.usage.monthBudget, color: .accentColor)
             Text("Local balance snapshots; counts balance drops only.")
                 .font(.system(size: 10))
@@ -810,7 +814,7 @@ struct ContentView: View {
         let isActive = account.id == viewModel.activeAccountID
         return HStack(alignment: .top, spacing: 8) {
             Circle()
-                .fill(isActive ? Color.green : Color.secondary.opacity(0.35))
+                .fill(isActive ? Color.deepSeekBlue : Color.secondary.opacity(0.35))
                 .frame(width: 7, height: 7)
                 .padding(.top, 7)
 
@@ -845,7 +849,7 @@ struct ContentView: View {
                 if isActive {
                     Text("Active")
                         .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(.green)
+                        .foregroundColor(.deepSeekBlue)
                 } else {
                     Button("Use") {
                         viewModel.activateAccount(account)
@@ -872,7 +876,7 @@ struct ContentView: View {
         .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 6)
-                .fill(isActive ? Color.green.opacity(0.10) : Color.secondary.opacity(0.06))
+                .fill(isActive ? Color.deepSeekBlue.opacity(0.10) : Color.secondary.opacity(0.06))
         )
     }
 
@@ -924,7 +928,7 @@ struct ContentView: View {
         if viewModel.balance.errorMessage != nil {
             return .yellow
         }
-        return viewModel.balance.hasBalance ? .green : .white.opacity(0.35)
+        return viewModel.balance.hasBalance ? .deepSeekBlue : .white.opacity(0.35)
     }
 
     private var updatedText: String {
