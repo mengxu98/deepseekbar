@@ -2,6 +2,7 @@
 set -euo pipefail
 
 APP_NAME="DeepSeekBar"
+APP_VERSION="0.0.2"
 BUILD_DIR=".build/release"
 APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
 DMG_STAGE="${BUILD_DIR}/dmg"
@@ -40,7 +41,7 @@ else
   echo "Warning: ${ICON_SOURCE} not found; building without a custom app icon."
 fi
 
-cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
+cat > "${APP_DIR}/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -52,9 +53,9 @@ cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.deepseekbar.app</string>
     <key>CFBundleVersion</key>
-    <string>0.0.2</string>
+    <string>${APP_VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.0.2</string>
+    <string>${APP_VERSION}</string>
     <key>DeepSeekBarGitHubLatestReleaseURL</key>
     <string>https://api.github.com/repos/mengxu98/deepseekbar/releases/latest</string>
     <key>CFBundlePackageType</key>
