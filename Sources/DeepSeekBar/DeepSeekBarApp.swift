@@ -15,6 +15,7 @@ private enum PopoverSizing {
 
 private extension Color {
     static let deepSeekBlue = Color(red: 0.10, green: 0.45, blue: 0.88)
+    static let tuiGreen = Color(red: 0.15, green: 0.68, blue: 0.38)
 }
 
 @MainActor
@@ -107,37 +108,37 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
     }
 
     private func availablePopoverHeightBelowStatusItem() -> CGFloat? {
-        guard let button = statusItem.button,
-              let window = button.window,
-              let screen = window.screen ?? NSScreen.main else {
+        guard let screen = NSScreen.main else {
             return nil
         }
-
-        let buttonFrameInWindow = button.convert(button.bounds, to: nil)
-        let buttonFrameOnScreen = window.convertToScreen(buttonFrameInWindow)
-        return max(
-            PopoverSizing.minimumHeight,
-            buttonFrameOnScreen.minY - screen.visibleFrame.minY - PopoverSizing.verticalMargin
-        )
+        let menuBarHeight = NSStatusBar.system.thickness
+        let visibleFrame = screen.visibleFrame
+        return visibleFrame.height - menuBarHeight - PopoverSizing.verticalMargin
     }
 
     private func showContextMenu() {
+        guard let button = statusItem.button else {
+            return
+        }
+
         let menu = NSMenu()
-        menu.addItem(withTitle: "Refresh", action: #selector(refreshFromMenu), keyEquivalent: "r").target = self
-        menu.addItem(withTitle: "Add API Key", action: #selector(addKeyFromMenu), keyEquivalent: "").target = self
+        menu.addItem(NSMenuItem(title: "Refresh", action: #selector(refreshFromMenu), keyEquivalent: "r"))
+        menu.addItem(NSMenuItem(title: "Check for Updates", action: #selector(checkForUpdatesFromMenu), keyEquivalent: ""))
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit DeepSeekBar", action: #selector(quit), keyEquivalent: "q").target = self
-        statusItem.menu = menu
-        statusItem.button?.performClick(nil)
-        statusItem.menu = nil
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
+        menu.popUp(positioning: nil, at: NSPoint(x: button.bounds.midX, y: button.bounds.minY - 2), in: button)
     }
 
     @objc private func refreshFromMenu() {
-        viewModel.refresh()
+        Task { @MainActor in
+            viewModel.refresh()
+        }
     }
 
-    @objc private func addKeyFromMenu() {
-        viewModel.promptForAPIKey()
+    @objc private func checkForUpdatesFromMenu() {
+        Task { @MainActor in
+            await viewModel.checkForUpdates(automatic: false)
+        }
     }
 
     @objc private func quit() {
@@ -148,13 +149,14 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
         guard let button = statusItem.button else {
             return
         }
-        if let total = balance.totalBalance {
-            let balanceText = "¥\(String(format: "%.2f", total))"
-            button.image = nil
-            button.attributedTitle = Self.makeStatusTitle(balanceText)
-            button.toolTip = "DeepSeekBar: \(balanceText)"
+
+        if let error = balance.errorMessage {
+            button.attributedTitle = Self.makeStatusTitle("DS!")
+            button.toolTip = error
+        } else if let total = balance.totalBalance {
+            button.attributedTitle = Self.makeStatusTitle(String(format: "¥%.0f", total))
+            button.toolTip = "DeepSeekBar · \(total.moneyText)"
         } else {
-            button.image = nil
             button.attributedTitle = Self.makeStatusTitle("DS")
             button.toolTip = "DeepSeekBar"
         }
@@ -164,14 +166,15 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
         NSAttributedString(
             string: text,
             attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold),
+                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
                 .foregroundColor: NSColor.labelColor
             ]
         )
     }
 }
 
-@MainActor
+// MARK: - ViewModel
+
 final class AppViewModel: ObservableObject {
     @Published var balance = BalanceState()
     @Published var usage = UsageEstimate()
@@ -181,20 +184,26 @@ final class AppViewModel: ObservableObject {
     @Published var accountBalances: [UUID: BalanceState] = [:]
     @Published var refreshIntervalMinutes: Int = 5
     @Published var isRefreshing = false
+    @Published var tuiSyncStatus: [UUID: Bool] = [:]
+    @Published var updateState: AppUpdateState = .idle
 
     var statusUpdater: ((BalanceState) -> Void)?
 
     private let keyStore = APIKeyStore()
     private let api = DeepSeekAPI()
     private let usageTracker = UsageTracker()
+    private let updateChecker = AppUpdateChecker()
     private var apiKey: String?
     private var timer: Timer?
+    private var updateTimer: Timer?
     private var utilityPanel: NSPanel?
 
     func start() {
         reloadAccounts()
         scheduleTimer()
+        scheduleUpdateTimer()
         refresh()
+        Task { await checkForUpdates(automatic: true) }
     }
 
     var activeAccount: APIKeyAccount? {
@@ -295,7 +304,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func promptForAPIKey() {
-        showUtilityPanel(size: NSSize(width: 376, height: 348)) {
+        showUtilityPanel(size: NSSize(width: 376, height: 400)) {
             AddAPIKeyPanelView(
                 onCancel: { [weak self] in
                     self?.closeUtilityPanel()
@@ -305,7 +314,8 @@ final class AppViewModel: ObservableObject {
                         draft.key,
                         name: draft.name,
                         baseURL: draft.baseURL,
-                        model: draft.model
+                        model: draft.model,
+                        tuiProvider: draft.tuiProvider
                     )
                     self?.closeUtilityPanel()
                 }
@@ -356,10 +366,11 @@ final class AppViewModel: ObservableObject {
         _ key: String,
         name: String = "",
         baseURL: String = DeepSeekProfilePreset.claudeCodePro1M.baseURL,
-        model: String = DeepSeekProfilePreset.claudeCodePro1M.model
+        model: String = DeepSeekProfilePreset.claudeCodePro1M.model,
+        tuiProvider: TUIProviderKind? = nil
     ) {
         do {
-            let account = try keyStore.addAccount(name: name, key: key)
+            let account = try keyStore.addAccount(name: name, key: key, tuiProvider: tuiProvider)
             try keyStore.updateAccount(id: account.id, name: account.displayName, baseURL: baseURL, model: model)
             reloadAccounts()
             refresh()
@@ -378,6 +389,12 @@ final class AppViewModel: ObservableObject {
                 statusUpdater?(cached)
             }
             refresh()
+
+            // Auto-sync to TUI if this account has a provider association
+            if account.tuiProvider != nil {
+                try? keyStore.exportToTUI(account: account)
+                tuiSyncStatus[account.id] = true
+            }
         } catch {
             balance = BalanceState(errorMessage: error.localizedDescription)
         }
@@ -459,6 +476,64 @@ final class AppViewModel: ObservableObject {
         usage = usageTracker.estimate(currentBalance: balance.totalBalance, namespace: usageNamespace)
     }
 
+    // MARK: - TUI Sync
+
+    func importFromTUI() {
+        do {
+            let count = try keyStore.importFromTUI()
+            reloadAccounts()
+            // Refresh to fetch balances for newly imported keys
+            if count > 0 { refresh() }
+        } catch {
+            balance = BalanceState(errorMessage: "TUI import failed: \(error.localizedDescription)")
+        }
+    }
+
+    func syncAccountToTUI(_ account: APIKeyAccount) {
+        do {
+            try keyStore.exportToTUI(account: account)
+        } catch {
+            balance = BalanceState(errorMessage: "TUI sync failed: \(error.localizedDescription)")
+        }
+    }
+
+    func removeAccountFromTUI(_ account: APIKeyAccount) {
+        do {
+            try keyStore.removeFromTUI(account: account)
+        } catch {
+            balance = BalanceState(errorMessage: "TUI remove failed: \(error.localizedDescription)")
+        }
+    }
+
+    func isAccountSyncedToTUI(_ account: APIKeyAccount) -> Bool {
+        tuiSyncStatus[account.id] ?? false
+    }
+
+    func checkForUpdates(automatic: Bool) async {
+        if case .checking = updateState {
+            return
+        }
+
+        updateState = .checking
+        do {
+            if let update = try await updateChecker.check() {
+                updateState = .available(update)
+            } else {
+                updateState = automatic ? .idle : .upToDate(checkedVersion: updateChecker.currentVersion)
+            }
+        } catch {
+            updateState = automatic ? .idle : .failed(error.localizedDescription)
+        }
+    }
+
+    func openUpdateDownload() {
+        guard case let .available(update) = updateState else {
+            Task { await checkForUpdates(automatic: false) }
+            return
+        }
+        NSWorkspace.shared.open(update.releaseURL)
+    }
+
     private var usageNamespace: String {
         activeAccount?.id.uuidString ?? "default"
     }
@@ -471,6 +546,22 @@ final class AppViewModel: ObservableObject {
         apiKey = loaded.key
         keySource = loaded.source
         usage = usageTracker.estimate(currentBalance: balance.totalBalance, namespace: usageNamespace)
+        queueTUISyncCacheRefresh()
+    }
+
+    private func queueTUISyncCacheRefresh() {
+        let currentAccounts = accounts
+        Task.detached(priority: .background) { [weak self] in
+            let store = APIKeyStore()
+            var status: [UUID: Bool] = [:]
+            for account in currentAccounts where account.tuiProvider != nil {
+                status[account.id] = store.isSyncedWithTUI(account: account)
+            }
+            let finalStatus = status
+            await MainActor.run { [weak self] in
+                self?.tuiSyncStatus = finalStatus
+            }
+        }
     }
 
     private func scheduleTimer() {
@@ -481,13 +572,25 @@ final class AppViewModel: ObservableObject {
             }
         }
     }
+
+    private func scheduleUpdateTimer() {
+        updateTimer?.invalidate()
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.checkForUpdates(automatic: true)
+            }
+        }
+    }
 }
+
+// MARK: - Draft & Panels
 
 struct APIKeyDraft {
     var name: String
     var key: String
     var baseURL: String
     var model: String
+    var tuiProvider: TUIProviderKind?
 }
 
 struct AddAPIKeyPanelView: View {
@@ -498,6 +601,7 @@ struct AddAPIKeyPanelView: View {
     @State private var key = ""
     @State private var selectedPreset = DeepSeekProfilePreset.claudeCodePro1M
     @State private var baseURL = DeepSeekProfilePreset.claudeCodePro1M.baseURL
+    @State private var selectedProvider: TUIProviderKind?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -522,6 +626,19 @@ struct AddAPIKeyPanelView: View {
                 modalFieldLabel("Base URL")
                 TextField("https://api.deepseek.com/anthropic", text: $baseURL)
                     .modalTextField()
+
+                modalFieldLabel("TUI Provider (for sync)")
+                HStack(spacing: 4) {
+                    Picker("", selection: $selectedProvider) {
+                        Text("None").tag(nil as TUIProviderKind?)
+                        ForEach(TUIProviderKind.allCases) { provider in
+                            Text(provider.displayName).tag(provider as TUIProviderKind?)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
+                }
             }
 
             HStack {
@@ -538,7 +655,8 @@ struct AddAPIKeyPanelView: View {
                             name: name,
                             key: key,
                             baseURL: baseURL,
-                            model: selectedPreset.model
+                            model: selectedPreset.model,
+                            tuiProvider: selectedProvider
                         )
                     )
                 }
@@ -631,8 +749,11 @@ struct RefreshIntervalPanelView: View {
     }
 }
 
+// MARK: - ContentView
+
 struct ContentView: View {
     @ObservedObject var viewModel: AppViewModel
+    @State private var pendingDeleteAccountID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -672,6 +793,12 @@ struct ContentView: View {
 
     private var bodyContent: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if case let .available(update) = viewModel.updateState {
+                updateBanner(update)
+            }
+            if case let .failed(message) = viewModel.updateState {
+                errorBanner("Update check failed: \(message)")
+            }
             accountsCard
             usageCard
             if let error = viewModel.balance.errorMessage {
@@ -688,6 +815,14 @@ struct ContentView: View {
                 Text("API Keys")
                     .font(.system(size: 12, weight: .semibold))
                 Spacer()
+                Button {
+                    viewModel.importFromTUI()
+                } label: {
+                    Text("Import")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
                 Button {
                     viewModel.promptForAPIKey()
                 } label: {
@@ -803,6 +938,18 @@ struct ContentView: View {
             .focusable(false)
             .fixedSize()
 
+            Button {
+                handleUpdateAction()
+            } label: {
+                Image(systemName: updateIconName)
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .disabled(updateButtonDisabled)
+            .foregroundColor(updateButtonColor)
+            .help(updateHelpText)
+
             Spacer()
             toolbarButton("power", action: { NSApp.terminate(nil) })
         }
@@ -812,17 +959,27 @@ struct ContentView: View {
 
     private func accountRow(_ account: APIKeyAccount) -> some View {
         let isActive = account.id == viewModel.activeAccountID
-        return HStack(alignment: .top, spacing: 8) {
+        return HStack(alignment: .top, spacing: 7) {
             Circle()
                 .fill(isActive ? Color.deepSeekBlue : Color.secondary.opacity(0.35))
-                .frame(width: 7, height: 7)
-                .padding(.top, 7)
+                .frame(width: 6, height: 6)
+                .padding(.top, 6)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(account.displayName)
                         .font(.system(size: 11.5, weight: .semibold))
                         .lineLimit(1)
+
+                    if let provider = account.tuiProvider {
+                        Text(provider.displayName)
+                            .font(.system(size: 8.5, weight: .medium))
+                            .foregroundColor(.tuiGreen)
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(Color.tuiGreen.opacity(0.12))
+                            .cornerRadius(3)
+                    }
 
                     Spacer(minLength: 4)
 
@@ -845,7 +1002,7 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            VStack(alignment: .trailing, spacing: 8) {
+            VStack(alignment: .trailing, spacing: 10) {
                 if isActive {
                     Text("Active")
                         .font(.system(size: 9, weight: .medium))
@@ -859,21 +1016,38 @@ struct ContentView: View {
                     .font(.system(size: 10, weight: .medium))
                 }
 
-                Button {
-                    viewModel.removeAccount(account)
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 10))
+                HStack(spacing: 6) {
+                    if account.tuiProvider != nil {
+                        Button {
+                            viewModel.syncAccountToTUI(account)
+                        } label: {
+                            Image(systemName: viewModel.isAccountSyncedToTUI(account) ? "checkmark.icloud" : "icloud.and.arrow.up")
+                                .font(.system(size: 10))
+                        }
+                        .buttonStyle(.plain)
+                        .focusable(false)
+                        .foregroundColor(viewModel.isAccountSyncedToTUI(account) ? .tuiGreen : .secondary)
+                        .help(viewModel.isAccountSyncedToTUI(account) ? "Synced to TUI" : "Sync to TUI")
+                    }
+                    Button {
+                        pendingDeleteAccountID = account.id
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .focusable(false)
+                    .foregroundColor(.secondary)
+                    .popover(isPresented: deleteConfirmationBinding(for: account)) {
+                        deleteConfirmationPopover(for: account)
+                    }
                 }
-                .buttonStyle(.plain)
-                .focusable(false)
-                .foregroundColor(.secondary)
             }
-            .frame(width: 45, alignment: .trailing)
+            .frame(width: 55, alignment: .trailing)
         }
-        .frame(height: 72)
+        .frame(height: 54)
         .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(.vertical, 5)
         .background(
             RoundedRectangle(cornerRadius: 6)
                 .fill(isActive ? Color.deepSeekBlue.opacity(0.10) : Color.secondary.opacity(0.06))
@@ -903,6 +1077,51 @@ struct ContentView: View {
         .help(name)
     }
 
+    private func deleteConfirmationBinding(for account: APIKeyAccount) -> Binding<Bool> {
+        Binding(
+            get: { pendingDeleteAccountID == account.id },
+            set: { isPresented in
+                if isPresented == false, pendingDeleteAccountID == account.id {
+                    pendingDeleteAccountID = nil
+                }
+            }
+        )
+    }
+
+    private func deleteConfirmationPopover(for account: APIKeyAccount) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Delete this key?")
+                .font(.system(size: 12, weight: .semibold))
+
+            Text(account.maskedKey)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+
+            HStack(spacing: 8) {
+                Button("Cancel") {
+                    pendingDeleteAccountID = nil
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+
+                Spacer(minLength: 0)
+
+                Button("Delete") {
+                    pendingDeleteAccountID = nil
+                    viewModel.removeAccount(account)
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .foregroundColor(.red)
+                .font(.system(size: 11, weight: .semibold))
+            }
+            .font(.system(size: 11, weight: .medium))
+        }
+        .padding(12)
+        .frame(width: 178)
+    }
+
     private func errorBanner(_ error: String) -> some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -920,8 +1139,95 @@ struct ContentView: View {
         )
     }
 
+    private func updateBanner(_ update: AppUpdateInfo) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(.deepSeekBlue)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Update \(update.latestVersion) available")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("Current \(update.currentVersion) · \(update.releaseName)")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 6)
+
+            Button("Open") {
+                viewModel.openUpdateDownload()
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .font(.system(size: 10, weight: .semibold))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.deepSeekBlue.opacity(0.10))
+        )
+    }
+
     private func setIntervalFromFooter(_ minutes: Int) {
         viewModel.setRefreshInterval(minutes)
+    }
+
+    private func handleUpdateAction() {
+        switch viewModel.updateState {
+        case .available:
+            viewModel.openUpdateDownload()
+        default:
+            Task { await viewModel.checkForUpdates(automatic: false) }
+        }
+    }
+
+    private var updateIconName: String {
+        switch viewModel.updateState {
+        case .checking:
+            return "hourglass"
+        case .available:
+            return "arrow.down.circle.fill"
+        case .failed:
+            return "exclamationmark.circle"
+        default:
+            return "arrow.down.circle"
+        }
+    }
+
+    private var updateButtonDisabled: Bool {
+        if case .checking = viewModel.updateState {
+            return true
+        }
+        return false
+    }
+
+    private var updateButtonColor: Color {
+        switch viewModel.updateState {
+        case .available:
+            return .deepSeekBlue
+        case .failed:
+            return .yellow
+        default:
+            return .secondary
+        }
+    }
+
+    private var updateHelpText: String {
+        switch viewModel.updateState {
+        case .checking:
+            return "Checking for updates"
+        case let .available(update):
+            return "Open DeepSeekBar \(update.latestVersion)"
+        case let .upToDate(version):
+            return "DeepSeekBar is up to date (\(version))"
+        case .failed:
+            return "Update check failed; click to retry"
+        case .idle:
+            return "Check for updates"
+        }
     }
 
     private var statusColor: Color {
@@ -938,6 +1244,8 @@ struct ContentView: View {
         return "Updated " + updatedAt.formatted(date: .omitted, time: .standard)
     }
 }
+
+// MARK: - Shared View Helpers
 
 @MainActor
 private func modalHeader(_ title: String, subtitle: String) -> some View {

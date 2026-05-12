@@ -107,14 +107,15 @@ final class APIKeyStore {
     }
 
     @discardableResult
-    func addAccount(name: String, key: String) throws -> APIKeyAccount {
+    func addAccount(name: String, key: String, tuiProvider: TUIProviderKind? = nil) throws -> APIKeyAccount {
         let cleaned = try cleanedKey(key)
         var state = loadState()
         let account = APIKeyAccount(
             id: UUID(),
             name: name.trimmingCharacters(in: .whitespacesAndNewlines).trimmedNonEmpty ?? "Key \(state.accounts.count + 1)",
             key: cleaned,
-            createdAt: Date()
+            createdAt: Date(),
+            tuiProvider: tuiProvider
         )
         state.accounts.append(account)
         state.activeAccountID = account.id
@@ -153,7 +154,8 @@ final class APIKeyStore {
             key: current.key,
             createdAt: current.createdAt,
             baseURL: baseURL.trimmedNonEmpty ?? DeepSeekProfilePreset.claudeCodePro1M.baseURL,
-            model: model.trimmedNonEmpty ?? DeepSeekProfilePreset.claudeCodePro1M.model
+            model: model.trimmedNonEmpty ?? DeepSeekProfilePreset.claudeCodePro1M.model,
+            tuiProvider: current.tuiProvider
         )
         try saveState(state)
     }
@@ -171,7 +173,8 @@ final class APIKeyStore {
             key: current.key,
             createdAt: current.createdAt,
             baseURL: preset.baseURL,
-            model: preset.model
+            model: preset.model,
+            tuiProvider: current.tuiProvider
         )
         try saveState(state)
     }
@@ -187,6 +190,121 @@ final class APIKeyStore {
             try? fileManager.removeItem(at: savedKeyURL)
         }
     }
+
+    // MARK: - TUI Sync
+
+    /// Imports API keys from DeepSeek-TUI's storage back into DeepSeekBar accounts.
+    /// Resolution order mirrors TUI: Keychain → config.toml → secrets.json.
+    /// Returns the number of newly imported accounts.
+    @discardableResult
+    func importFromTUI() throws -> Int {
+        var state = loadState()
+        let existingKeys = Set(state.accounts.map { $0.key })
+        var imported = 0
+
+        // 1. Keychain entries
+        for provider in TUIProviderKind.allCases {
+            guard let key = KeychainBridge.get(account: provider.rawValue),
+                  !existingKeys.contains(key) else {
+                continue
+            }
+
+            let account = APIKeyAccount(
+                id: UUID(),
+                name: "TUI · \(provider.displayName)",
+                key: key,
+                createdAt: Date(),
+                baseURL: provider.defaultBaseURL,
+                model: provider.defaultModel,
+                tuiProvider: provider
+            )
+            state.accounts.append(account)
+            imported += 1
+        }
+
+        // 2. config.toml provider sections
+        let tomlProviders = DeepSeekTUIConfig.loadProviders()
+        for (name, config) in tomlProviders {
+            guard let key = config.apiKey,
+                  !existingKeys.contains(key) else {
+                continue
+            }
+
+            let provider = TUIProviderKind.allCases.first { $0.rawValue == name }
+            let account = APIKeyAccount(
+                id: UUID(),
+                name: "TUI · \(provider?.displayName ?? name)",
+                key: key,
+                createdAt: Date(),
+                baseURL: config.baseURL ?? provider?.defaultBaseURL ?? DeepSeekProfilePreset.claudeCodePro1M.baseURL,
+                model: config.model ?? provider?.defaultModel ?? DeepSeekProfilePreset.claudeCodePro1M.model,
+                tuiProvider: provider
+            )
+            state.accounts.append(account)
+            imported += 1
+        }
+
+        // 3. secrets.json fallback
+        let secrets = SecretsFileStore.loadAll()
+        for (name, key) in secrets {
+            guard !existingKeys.contains(key) else { continue }
+            let provider = TUIProviderKind.allCases.first { $0.rawValue == name }
+            let account = APIKeyAccount(
+                id: UUID(),
+                name: "TUI · \(provider?.displayName ?? name)",
+                key: key,
+                createdAt: Date(),
+                baseURL: provider?.defaultBaseURL ?? DeepSeekProfilePreset.claudeCodePro1M.baseURL,
+                model: provider?.defaultModel ?? DeepSeekProfilePreset.claudeCodePro1M.model,
+                tuiProvider: provider
+            )
+            state.accounts.append(account)
+            imported += 1
+        }
+
+        // Deduplicate by key, keeping first
+        var seen: Set<String> = []
+        state.accounts = state.accounts.filter { seen.insert($0.key).inserted }
+
+        try saveState(state)
+        return imported
+    }
+
+    /// Exports an account's API key to DeepSeek-TUI's storage.
+    /// Writes to Keychain (primary) and config.toml (secondary).
+    func exportToTUI(account: APIKeyAccount) throws {
+        let providerName = account.tuiProvider?.rawValue ?? "deepseek"
+
+        // Write to Keychain (TUI's primary credential store)
+        try KeychainBridge.set(account.key, account: providerName)
+
+        // Write to config.toml
+        try DeepSeekTUIConfig.saveProvider(
+            named: providerName,
+            apiKey: account.key,
+            baseURL: account.baseURL,
+            model: account.model
+        )
+    }
+
+    /// Removes the account's key from TUI storage (Keychain + config.toml).
+    func removeFromTUI(account: APIKeyAccount) throws {
+        let providerName = account.tuiProvider?.rawValue ?? "deepseek"
+        KeychainBridge.delete(account: providerName)
+        // Only remove from config.toml if this specific key matches
+        if let tomlConfig = DeepSeekTUIConfig.loadProvider(named: providerName),
+           tomlConfig.apiKey == account.key {
+            try DeepSeekTUIConfig.setAPIKey(nil, forProvider: providerName)
+        }
+    }
+
+    /// Checks whether an account is currently synced with TUI storage.
+    func isSyncedWithTUI(account: APIKeyAccount) -> Bool {
+        let providerName = account.tuiProvider?.rawValue ?? "deepseek"
+        return KeychainBridge.get(account: providerName) == account.key
+    }
+
+    // MARK: - Private
 
     private func saveState(_ state: State) throws {
         try fileManager.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
@@ -205,7 +323,8 @@ final class APIKeyStore {
                     key: $0.key,
                     createdAt: $0.createdAt,
                     baseURL: $0.baseURL,
-                    model: $0.model
+                    model: $0.model,
+                    tuiProvider: $0.tuiProvider
                 )
             }
         let activeID = state.activeAccountID.flatMap { id in

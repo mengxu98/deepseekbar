@@ -52,9 +52,11 @@ cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.deepseekbar.app</string>
     <key>CFBundleVersion</key>
-    <string>1.0.0</string>
+    <string>0.0.2</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>0.0.2</string>
+    <key>DeepSeekBarGitHubLatestReleaseURL</key>
+    <string>https://api.github.com/repos/mengxu98/deepseekbar/releases/latest</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>

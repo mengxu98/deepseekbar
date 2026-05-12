@@ -77,6 +77,75 @@ enum DeepSeekProfilePreset: String, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - TUI Provider
+
+/// Mirrors DeepSeek-TUI's `ProviderKind` enum.
+enum TUIProviderKind: String, CaseIterable, Identifiable, Codable {
+    case deepseek
+    case nvidiaNim = "nvidia-nim"
+    case openai
+    case openrouter
+    case novita
+    case fireworks
+    case sglang
+    case vllm
+    case ollama
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .deepseek: return "DeepSeek"
+        case .nvidiaNim: return "NVIDIA NIM"
+        case .openai: return "OpenAI"
+        case .openrouter: return "OpenRouter"
+        case .novita: return "Novita"
+        case .fireworks: return "Fireworks"
+        case .sglang: return "SGLang"
+        case .vllm: return "vLLM"
+        case .ollama: return "Ollama"
+        }
+    }
+
+    var defaultBaseURL: String {
+        switch self {
+        case .deepseek: return "https://api.deepseek.com/beta"
+        case .nvidiaNim: return "https://integrate.api.nvidia.com/v1"
+        case .openai: return "https://api.openai.com/v1"
+        case .openrouter: return "https://openrouter.ai/api/v1"
+        case .novita: return "https://api.novita.ai/v1"
+        case .fireworks: return "https://api.fireworks.ai/inference/v1"
+        case .sglang: return "http://localhost:30000/v1"
+        case .vllm: return "http://localhost:8000/v1"
+        case .ollama: return "http://localhost:11434/v1"
+        }
+    }
+
+    var defaultModel: String {
+        switch self {
+        case .deepseek: return "deepseek-v4-pro"
+        case .nvidiaNim: return "deepseek-ai/deepseek-v4-pro"
+        case .openai: return "gpt-4.1"
+        case .openrouter: return "deepseek/deepseek-v4-pro"
+        case .novita: return "deepseek/deepseek-v4-pro"
+        case .fireworks: return "accounts/fireworks/models/deepseek-v4-pro"
+        case .sglang: return "deepseek-ai/DeepSeek-V4-Pro"
+        case .vllm: return "deepseek-ai/DeepSeek-V4-Pro"
+        case .ollama: return "deepseek-coder:1.3b"
+        }
+    }
+
+    /// Whether this provider typically requires an API key.
+    var requiresAuth: Bool {
+        switch self {
+        case .sglang, .vllm, .ollama: return false
+        default: return true
+        }
+    }
+}
+
+// MARK: - Account
+
 struct APIKeyAccount: Identifiable, Equatable, Codable {
     var id: UUID
     var name: String
@@ -84,41 +153,44 @@ struct APIKeyAccount: Identifiable, Equatable, Codable {
     var createdAt: Date
     var baseURL: String
     var model: String
+    var tuiProvider: TUIProviderKind?
 
     init(
         id: UUID,
         name: String,
         key: String,
         createdAt: Date,
-        baseURL: String = DeepSeekProfilePreset.claudeCodePro1M.baseURL,
-        model: String = DeepSeekProfilePreset.claudeCodePro1M.model
+        baseURL: String? = nil,
+        model: String? = nil,
+        tuiProvider: TUIProviderKind? = nil
     ) {
         self.id = id
         self.name = name
         self.key = key
         self.createdAt = createdAt
-        self.baseURL = baseURL.trimmedNonEmpty ?? DeepSeekProfilePreset.claudeCodePro1M.baseURL
-        self.model = model.trimmedNonEmpty ?? DeepSeekProfilePreset.claudeCodePro1M.model
+        self.baseURL = baseURL?.trimmedNonEmpty ?? DeepSeekProfilePreset.claudeCodePro1M.baseURL
+        self.model = model?.trimmedNonEmpty ?? DeepSeekProfilePreset.claudeCodePro1M.model
+        self.tuiProvider = tuiProvider
     }
 
     enum CodingKeys: String, CodingKey {
-        case id
-        case name
-        case key
-        case createdAt
-        case baseURL
-        case model
+        case id, name, key, createdAt, baseURL, model
+        case tuiProvider = "tui_provider"
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL)
+        let model = try container.decodeIfPresent(String.self, forKey: .model)
+        let provider = try container.decodeIfPresent(TUIProviderKind.self, forKey: .tuiProvider)
         self.init(
             id: try container.decode(UUID.self, forKey: .id),
             name: try container.decode(String.self, forKey: .name),
             key: try container.decode(String.self, forKey: .key),
             createdAt: try container.decode(Date.self, forKey: .createdAt),
-            baseURL: try container.decodeIfPresent(String.self, forKey: .baseURL) ?? DeepSeekProfilePreset.claudeCodePro1M.baseURL,
-            model: try container.decodeIfPresent(String.self, forKey: .model) ?? DeepSeekProfilePreset.claudeCodePro1M.model
+            baseURL: baseURL,
+            model: model,
+            tuiProvider: provider
         )
     }
 
