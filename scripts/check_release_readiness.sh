@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 echo "== Typecheck =="
-mkdir -p .build/module-cache
-swiftc -typecheck -module-cache-path .build/module-cache Sources/DeepSeekBar/*.swift
+# Typecheck via SwiftPM so generated Bundle.module (resources) is available.
+swift build -c debug
 
 echo "== Shell syntax =="
 bash -n build.sh
