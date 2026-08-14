@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="DeepSeekBar"
-APP_VERSION="0.0.3"
+APP_VERSION="0.0.4"
 BUILD_DIR=".build/release"
 APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
 DMG_STAGE="${BUILD_DIR}/dmg"
@@ -22,10 +22,12 @@ mkdir -p "${APP_DIR}/Contents/Resources"
 
 cp "${BUILD_DIR}/${APP_NAME}" "${APP_DIR}/Contents/MacOS/"
 
-# Copy SwiftPM resource bundle (bundled logo etc.)
-BUNDLE_SOURCE="${BUILD_DIR}/${APP_NAME}_${APP_NAME}.bundle"
-if [[ -d "${BUNDLE_SOURCE}" ]]; then
-  cp -R "${BUNDLE_SOURCE}" "${APP_DIR}/Contents/Resources/"
+# Copy bundled resources (menu-bar icon) into Contents/Resources.
+# Loaded via Bundle.main; no SwiftPM resource bundle needed (avoids
+# launch-time "could not load resource bundle" in release builds).
+RESOURCE_DIR="Sources/${APP_NAME}/Resources"
+if [[ -d "${RESOURCE_DIR}" ]]; then
+  cp -R "${RESOURCE_DIR}/." "${APP_DIR}/Contents/Resources/"
 fi
 
 if [[ -f "${ICON_SOURCE}" ]]; then

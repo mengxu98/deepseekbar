@@ -20,6 +20,10 @@ private extension Color {
 
 /// Popover/panel surface: clean white in light mode; the system dark
 /// surface in dark mode so sheets don't glare inside a dark UI.
+/// A dynamic NSColor resolves against the view's appearance, which follows
+/// the system for a menu-bar app. (A computed color keyed off
+/// NSApp.effectiveAppearance is unreliable here: a menu-bar app has no
+/// regular window, so NSApp.effectiveAppearance can stay light in dark mode.)
 private let panelBackgroundColor = Color(nsColor: NSColor(name: nil) { appearance in
     appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         ? NSColor.windowBackgroundColor
@@ -41,6 +45,41 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
             self?.updateStatusItem(balance: balance)
         }
         viewModel.start()
+
+        // Screenshot helpers (README figures): --show-popover opens the
+        // popover after launch; --dark forces dark appearance;
+        // --screenshot renders the popover view directly to a PNG
+        // (screen capture cannot grab the menu-bar-layer panel).
+        if CommandLine.arguments.contains("--dark") {
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        } else if CommandLine.arguments.contains("--screenshot") {
+            // Force light appearance so the light screenshot is actually light.
+            NSApp.appearance = NSAppearance(named: .aqua)
+        }
+        if CommandLine.arguments.contains("--show-popover") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.togglePopover()
+            }
+        }
+        if Self.screenshotPathArgument() != nil {
+            // Keep the real popover on screen for an external screenshot;
+            // offscreen export of SwiftUI content is unreliable here.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.showPopover()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 90) {
+                    NSApp.terminate(nil)
+                }
+            }
+        }
+    }
+
+    private static func screenshotPathArgument() -> String? {
+        guard let idx = CommandLine.arguments.firstIndex(of: "--screenshot") else {
+            return nil
+        }
+        let next = CommandLine.arguments.index(after: idx)
+        guard next < CommandLine.arguments.endIndex else { return nil }
+        return CommandLine.arguments[next]
     }
 
     private func configureMainMenu() {
@@ -150,8 +189,10 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
     /// Menu-bar icon from the official deepseek-harness-desktop app
     /// (apps/desktop/resources/trayTemplate@2x.png): designed as a template
     /// image so the system tints it for the current menu-bar appearance.
+    /// Copied into Contents/Resources by build.sh; loaded via Bundle.main
+    /// (no SwiftPM resource bundle, which is fragile in release builds).
     private static let statusLogo: NSImage? = {
-        guard let url = Bundle.module.url(forResource: "tray-icon", withExtension: "png"),
+        guard let url = Bundle.main.url(forResource: "tray-icon", withExtension: "png"),
               let image = NSImage(contentsOf: url) else {
             return nil
         }

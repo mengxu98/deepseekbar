@@ -12,10 +12,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "DeepSeekBar",
-            path: "Sources/DeepSeekBar",
-            resources: [
-                .copy("Resources")
-            ]
+            path: "Sources/DeepSeekBar"
         ),
         .testTarget(
             name: "DeepSeekBarTests",
