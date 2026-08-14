@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 
 struct AppUpdateInfo {
@@ -90,14 +89,14 @@ struct AppUpdateChecker {
         return url
     }
 
-    private static func normalizedVersion(_ version: String) -> String {
+    static func normalizedVersion(_ version: String) -> String {
         version
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingPrefix("v")
             .trimmingPrefix("V")
     }
 
-    private static func compareVersions(_ lhs: String, _ rhs: String) -> ComparisonResult {
+    static func compareVersions(_ lhs: String, _ rhs: String) -> ComparisonResult {
         let left = versionComponents(lhs)
         let right = versionComponents(rhs)
         let count = max(left.count, right.count)

@@ -73,6 +73,8 @@ final class APIKeyStore {
     }
 
     func loadState() -> State {
+        migrateLegacyKeysIfNeeded()
+
         if let data = try? Data(contentsOf: accountsURL),
            let state = try? JSONDecoder().decode(State.self, from: data) {
             return normalized(state)
@@ -107,15 +109,14 @@ final class APIKeyStore {
     }
 
     @discardableResult
-    func addAccount(name: String, key: String, tuiProvider: TUIProviderKind? = nil) throws -> APIKeyAccount {
+    func addAccount(name: String, key: String) throws -> APIKeyAccount {
         let cleaned = try cleanedKey(key)
         var state = loadState()
         let account = APIKeyAccount(
             id: UUID(),
             name: name.trimmingCharacters(in: .whitespacesAndNewlines).trimmedNonEmpty ?? "Key \(state.accounts.count + 1)",
             key: cleaned,
-            createdAt: Date(),
-            tuiProvider: tuiProvider
+            createdAt: Date()
         )
         state.accounts.append(account)
         state.activeAccountID = account.id
@@ -138,10 +139,11 @@ final class APIKeyStore {
         if state.activeAccountID == id {
             state.activeAccountID = state.accounts.first?.id
         }
+        AppKeychainStore.delete(account: id.uuidString)
         try saveState(state)
     }
 
-    func updateAccount(id: UUID, name: String, baseURL: String, model: String) throws {
+    func updateAccount(id: UUID, name: String) throws {
         var state = loadState()
         guard let index = state.accounts.firstIndex(where: { $0.id == id }) else {
             return
@@ -152,29 +154,7 @@ final class APIKeyStore {
             id: current.id,
             name: name.trimmedNonEmpty ?? current.displayName,
             key: current.key,
-            createdAt: current.createdAt,
-            baseURL: baseURL.trimmedNonEmpty ?? DeepSeekProfilePreset.claudeCodePro1M.baseURL,
-            model: model.trimmedNonEmpty ?? DeepSeekProfilePreset.claudeCodePro1M.model,
-            tuiProvider: current.tuiProvider
-        )
-        try saveState(state)
-    }
-
-    func applyPreset(_ preset: DeepSeekProfilePreset, to id: UUID) throws {
-        var state = loadState()
-        guard let index = state.accounts.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-
-        let current = state.accounts[index]
-        state.accounts[index] = APIKeyAccount(
-            id: current.id,
-            name: current.name,
-            key: current.key,
-            createdAt: current.createdAt,
-            baseURL: preset.baseURL,
-            model: preset.model,
-            tuiProvider: current.tuiProvider
+            createdAt: current.createdAt
         )
         try saveState(state)
     }
@@ -182,6 +162,7 @@ final class APIKeyStore {
     func clearSavedKey() throws {
         var state = loadState()
         if let active = activeAccount(in: state) {
+            AppKeychainStore.delete(account: active.id.uuidString)
             state.accounts.removeAll { $0.id == active.id }
             state.activeAccountID = state.accounts.first?.id
             try saveState(state)
@@ -191,126 +172,49 @@ final class APIKeyStore {
         }
     }
 
-    // MARK: - TUI Sync
-
-    /// Imports API keys from DeepSeek-TUI's storage back into DeepSeekBar accounts.
-    /// Resolution order mirrors TUI: Keychain → config.toml → secrets.json.
-    /// Returns the number of newly imported accounts.
-    @discardableResult
-    func importFromTUI() throws -> Int {
-        var state = loadState()
-        let existingKeys = Set(state.accounts.map { $0.key })
-        var imported = 0
-
-        // 1. Keychain entries
-        for provider in TUIProviderKind.allCases {
-            guard let key = KeychainBridge.get(account: provider.rawValue),
-                  !existingKeys.contains(key) else {
-                continue
-            }
-
-            let account = APIKeyAccount(
-                id: UUID(),
-                name: "TUI · \(provider.displayName)",
-                key: key,
-                createdAt: Date(),
-                baseURL: provider.defaultBaseURL,
-                model: provider.defaultModel,
-                tuiProvider: provider
-            )
-            state.accounts.append(account)
-            imported += 1
-        }
-
-        // 2. config.toml provider sections
-        let tomlProviders = DeepSeekTUIConfig.loadProviders()
-        for (name, config) in tomlProviders {
-            guard let key = config.apiKey,
-                  !existingKeys.contains(key) else {
-                continue
-            }
-
-            let provider = TUIProviderKind.allCases.first { $0.rawValue == name }
-            let account = APIKeyAccount(
-                id: UUID(),
-                name: "TUI · \(provider?.displayName ?? name)",
-                key: key,
-                createdAt: Date(),
-                baseURL: config.baseURL ?? provider?.defaultBaseURL ?? DeepSeekProfilePreset.claudeCodePro1M.baseURL,
-                model: config.model ?? provider?.defaultModel ?? DeepSeekProfilePreset.claudeCodePro1M.model,
-                tuiProvider: provider
-            )
-            state.accounts.append(account)
-            imported += 1
-        }
-
-        // 3. secrets.json fallback
-        let secrets = SecretsFileStore.loadAll()
-        for (name, key) in secrets {
-            guard !existingKeys.contains(key) else { continue }
-            let provider = TUIProviderKind.allCases.first { $0.rawValue == name }
-            let account = APIKeyAccount(
-                id: UUID(),
-                name: "TUI · \(provider?.displayName ?? name)",
-                key: key,
-                createdAt: Date(),
-                baseURL: provider?.defaultBaseURL ?? DeepSeekProfilePreset.claudeCodePro1M.baseURL,
-                model: provider?.defaultModel ?? DeepSeekProfilePreset.claudeCodePro1M.model,
-                tuiProvider: provider
-            )
-            state.accounts.append(account)
-            imported += 1
-        }
-
-        // Deduplicate by key, keeping first
-        var seen: Set<String> = []
-        state.accounts = state.accounts.filter { seen.insert($0.key).inserted }
-
-        try saveState(state)
-        return imported
-    }
-
-    /// Exports an account's API key to DeepSeek-TUI's storage.
-    /// Writes to Keychain (primary) and config.toml (secondary).
-    func exportToTUI(account: APIKeyAccount) throws {
-        let providerName = account.tuiProvider?.rawValue ?? "deepseek"
-
-        // Write to Keychain (TUI's primary credential store)
-        try KeychainBridge.set(account.key, account: providerName)
-
-        // Write to config.toml
-        try DeepSeekTUIConfig.saveProvider(
-            named: providerName,
-            apiKey: account.key,
-            baseURL: account.baseURL,
-            model: account.model
-        )
-    }
-
-    /// Removes the account's key from TUI storage (Keychain + config.toml).
-    func removeFromTUI(account: APIKeyAccount) throws {
-        let providerName = account.tuiProvider?.rawValue ?? "deepseek"
-        KeychainBridge.delete(account: providerName)
-        // Only remove from config.toml if this specific key matches
-        if let tomlConfig = DeepSeekTUIConfig.loadProvider(named: providerName),
-           tomlConfig.apiKey == account.key {
-            try DeepSeekTUIConfig.setAPIKey(nil, forProvider: providerName)
-        }
-    }
-
-    /// Checks whether an account is currently synced with TUI storage.
-    func isSyncedWithTUI(account: APIKeyAccount) -> Bool {
-        let providerName = account.tuiProvider?.rawValue ?? "deepseek"
-        return KeychainBridge.get(account: providerName) == account.key
-    }
-
     // MARK: - Private
 
     private func saveState(_ state: State) throws {
         try fileManager.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+
+        // 1. Secrets live in the Keychain only. APIKeyAccount's CodingKeys
+        //    omit `key`, so the JSON below holds metadata exclusively.
+        for account in state.accounts {
+            try AppKeychainStore.set(account.key, account: account.id.uuidString)
+        }
+
+        // 2. Metadata → JSON (0600, atomic).
         let data = try JSONEncoder().encode(normalized(state))
         try data.write(to: accountsURL, options: .atomic)
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: accountsURL.path)
+    }
+
+    /// One-time migration: older builds stored plaintext keys inside
+    /// api_keys.json. Move those into the Keychain, then rewrite the file
+    /// with metadata only.
+    private func migrateLegacyKeysIfNeeded() {
+        guard let data = try? Data(contentsOf: accountsURL) else { return }
+
+        struct LegacyAccount: Decodable {
+            let id: UUID
+            let key: String?
+        }
+        struct LegacyState: Decodable {
+            let accounts: [LegacyAccount]
+        }
+
+        guard let legacy = try? JSONDecoder().decode(LegacyState.self, from: data) else { return }
+        let plaintextKeys = legacy.accounts.filter { $0.key?.isEmpty == false }
+        guard !plaintextKeys.isEmpty else { return }
+
+        for account in plaintextKeys {
+            try? AppKeychainStore.set(account.key!, account: account.id.uuidString)
+        }
+        // Rewrite without plaintext keys (APIKeyAccount decodes the key back
+        // from the Keychain, so the round-trip preserves the accounts).
+        if let state = try? JSONDecoder().decode(State.self, from: data) {
+            try? saveState(state)
+        }
     }
 
     private func normalized(_ state: State) -> State {
@@ -321,10 +225,7 @@ final class APIKeyStore {
                     id: $0.id,
                     name: $0.name,
                     key: $0.key,
-                    createdAt: $0.createdAt,
-                    baseURL: $0.baseURL,
-                    model: $0.model,
-                    tuiProvider: $0.tuiProvider
+                    createdAt: $0.createdAt
                 )
             }
         let activeID = state.activeAccountID.flatMap { id in
@@ -336,8 +237,19 @@ final class APIKeyStore {
     private func cleanedKey(_ key: String) throws -> String {
         let cleaned = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleaned.isEmpty == false else {
-            throw CocoaError(.validationMissingMandatoryProperty)
+            throw APIKeyStoreError.emptyKey
         }
         return cleaned
+    }
+}
+
+enum APIKeyStoreError: LocalizedError {
+    case emptyKey
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyKey:
+            return "API key must not be empty."
+        }
     }
 }

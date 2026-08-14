@@ -1,18 +1,54 @@
 import Foundation
 
+/// Aggregated usage statistics derived from local balance snapshots.
+///
+/// DeepSeek's API only exposes the current balance, so usage is estimated
+/// from balance drops between refreshes (top-ups reset the baseline).
+struct UsageStats: Equatable {
+    var todayUsed: Double = 0
+    var yesterdayUsed: Double = 0
+    var weekUsed: Double = 0
+    var monthUsed: Double = 0
+    /// Total consumption since the earliest snapshot (i.e. since the last
+    /// top-up, which resets the snapshot baseline).
+    var totalUsed: Double = 0
+    var dailyAverage: Double = 0
+    var daysRemaining: Double?
+    var balance: Double?
+    /// Recent balance history (oldest → newest) for a sparkline.
+    var snapshots: [Double] = []
+
+    var hasSnapshots: Bool { snapshots.count > 1 }
+}
+
 final class UsageTracker {
     private struct Snapshot: Codable {
         let date: Date
         let balance: Double
     }
 
-    private let fileManager = FileManager.default
-    private let calendar = Calendar.current
+    private let fileManager: FileManager
+    private let calendar: Calendar
+    private let baseDirectory: URL
+
+    init(
+        fileManager: FileManager = .default,
+        calendar: Calendar = .current,
+        baseDirectory: URL? = nil
+    ) {
+        self.fileManager = fileManager
+        self.calendar = calendar
+        if let baseDirectory {
+            self.baseDirectory = baseDirectory
+        } else {
+            self.baseDirectory = fileManager
+                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("DeepSeekBar", isDirectory: true)
+        }
+    }
 
     private func snapshotsURL(namespace: String) -> URL {
-        let dir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("DeepSeekBar", isDirectory: true)
-        return dir.appendingPathComponent("balance_snapshots_\(safeNamespace(namespace)).json")
+        baseDirectory.appendingPathComponent("balance_snapshots_\(safeNamespace(namespace)).json")
     }
 
     func record(balance: Double, namespace: String) {
@@ -24,24 +60,41 @@ final class UsageTracker {
         saveSnapshots(snapshots.suffix(1_000), namespace: namespace)
     }
 
-    func estimate(currentBalance: Double?, namespace: String) -> UsageEstimate {
+    /// Computes usage statistics for the current balance.
+    func stats(currentBalance: Double?, namespace: String) -> UsageStats {
         guard let currentBalance else {
-            return UsageEstimate()
+            return UsageStats()
         }
 
         let snapshots = loadSnapshots(namespace: namespace)
         let now = Date()
         let todayStart = calendar.startOfDay(for: now)
+        let yesterdayStart = calendar.date(byAdding: .day, value: -1, to: todayStart) ?? todayStart
+        let weekStart = calendar.date(byAdding: .day, value: -7, to: todayStart) ?? todayStart
         let monthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: now)) ?? todayStart
 
-        let todayBaseline = baseline(in: snapshots, since: todayStart) ?? currentBalance
-        let monthBaseline = baseline(in: snapshots, since: monthStart) ?? currentBalance
+        let todayBase = baseline(in: snapshots, since: todayStart) ?? currentBalance
+        let yesterdayBase = baseline(in: snapshots, since: yesterdayStart) ?? currentBalance
+        let weekBase = baseline(in: snapshots, since: weekStart) ?? currentBalance
+        let monthBase = baseline(in: snapshots, since: monthStart) ?? currentBalance
+        let earliestBase = snapshots.first?.balance ?? currentBalance
 
-        return UsageEstimate(
-            todayUsed: max(0, todayBaseline - currentBalance),
-            monthUsed: max(0, monthBaseline - currentBalance),
-            todayBudget: todayBaseline,
-            monthBudget: monthBaseline
+        let todayUsed = max(0, todayBase - currentBalance)
+        let monthUsed = max(0, monthBase - currentBalance)
+        let elapsedDays = max(1, calendar.component(.day, from: now))
+        let dailyAverage = monthUsed / Double(elapsedDays)
+        let daysRemaining = dailyAverage > 0 ? currentBalance / dailyAverage : nil
+
+        return UsageStats(
+            todayUsed: todayUsed,
+            yesterdayUsed: max(0, yesterdayBase - todayBase),
+            weekUsed: max(0, weekBase - currentBalance),
+            monthUsed: monthUsed,
+            totalUsed: max(0, earliestBase - currentBalance),
+            dailyAverage: dailyAverage,
+            daysRemaining: daysRemaining,
+            balance: currentBalance,
+            snapshots: Array(snapshots.suffix(24).map(\.balance))
         )
     }
 

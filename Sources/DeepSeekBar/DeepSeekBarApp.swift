@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Foundation
 
 private enum PopoverSizing {
     static let width: CGFloat = 300
@@ -15,8 +16,15 @@ private enum PopoverSizing {
 
 private extension Color {
     static let deepSeekBlue = Color(red: 0.10, green: 0.45, blue: 0.88)
-    static let tuiGreen = Color(red: 0.15, green: 0.68, blue: 0.38)
 }
+
+/// Popover/panel surface: clean white in light mode; the system dark
+/// surface in dark mode so sheets don't glare inside a dark UI.
+private let panelBackgroundColor = Color(nsColor: NSColor(name: nil) { appearance in
+    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        ? NSColor.windowBackgroundColor
+        : NSColor.white
+})
 
 @MainActor
 final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
@@ -64,7 +72,11 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
         guard let button = statusItem.button else {
             return
         }
-        button.attributedTitle = Self.makeStatusTitle("DS")
+        if let logo = Self.statusLogo {
+            button.image = logo
+            button.imagePosition = .imageLeading
+        }
+        button.attributedTitle = Self.makeStatusTitle("")
         button.toolTip = "DeepSeekBar"
         button.action = #selector(togglePopover)
         button.target = self
@@ -83,14 +95,6 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePopover() {
-        guard let event = NSApp.currentEvent else {
-            showPopover()
-            return
-        }
-        if event.type == .rightMouseUp {
-            showContextMenu()
-            return
-        }
         popover.isShown ? popover.performClose(nil) : showPopover()
     }
 
@@ -116,31 +120,6 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
         return visibleFrame.height - menuBarHeight - PopoverSizing.verticalMargin
     }
 
-    private func showContextMenu() {
-        guard let button = statusItem.button else {
-            return
-        }
-
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Refresh", action: #selector(refreshFromMenu), keyEquivalent: "r"))
-        menu.addItem(NSMenuItem(title: "Check for Updates", action: #selector(checkForUpdatesFromMenu), keyEquivalent: ""))
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
-        menu.popUp(positioning: nil, at: NSPoint(x: button.bounds.midX, y: button.bounds.minY - 2), in: button)
-    }
-
-    @objc private func refreshFromMenu() {
-        Task { @MainActor in
-            viewModel.refresh()
-        }
-    }
-
-    @objc private func checkForUpdatesFromMenu() {
-        Task { @MainActor in
-            await viewModel.checkForUpdates(automatic: false)
-        }
-    }
-
     @objc private func quit() {
         NSApp.terminate(nil)
     }
@@ -151,23 +130,42 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
         }
 
         if let error = balance.errorMessage {
-            button.attributedTitle = Self.makeStatusTitle("DS!")
+            button.attributedTitle = Self.makeStatusTitle("DS!", color: .systemYellow)
             button.toolTip = error
         } else if let total = balance.totalBalance {
-            button.attributedTitle = Self.makeStatusTitle(String(format: "¥%.0f", total))
-            button.toolTip = "DeepSeekBar · \(total.moneyText)"
+            if balance.isAvailable {
+                button.attributedTitle = Self.makeStatusTitle(total.compactMoneyText)
+                button.toolTip = "DeepSeekBar · \(total.moneyText(currency: balance.currency))"
+            } else {
+                // Balance exists but is insufficient for API calls.
+                button.attributedTitle = Self.makeStatusTitle("\(total.compactMoneyText)!", color: .systemOrange)
+                button.toolTip = "Balance insufficient for API calls. Top up at platform.deepseek.com."
+            }
         } else {
             button.attributedTitle = Self.makeStatusTitle("DS")
             button.toolTip = "DeepSeekBar"
         }
     }
 
-    private static func makeStatusTitle(_ text: String) -> NSAttributedString {
+    /// Menu-bar icon from the official deepseek-harness-desktop app
+    /// (apps/desktop/resources/trayTemplate@2x.png): designed as a template
+    /// image so the system tints it for the current menu-bar appearance.
+    private static let statusLogo: NSImage? = {
+        guard let url = Bundle.module.url(forResource: "tray-icon", withExtension: "png"),
+              let image = NSImage(contentsOf: url) else {
+            return nil
+        }
+        image.isTemplate = true
+        image.size = NSSize(width: 16, height: 16)
+        return image
+    }()
+
+    private static func makeStatusTitle(_ text: String, color: NSColor = .labelColor) -> NSAttributedString {
         NSAttributedString(
             string: text,
             attributes: [
                 .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
-                .foregroundColor: NSColor.labelColor
+                .foregroundColor: color
             ]
         )
     }
@@ -177,14 +175,13 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
 
 final class AppViewModel: ObservableObject {
     @Published var balance = BalanceState()
-    @Published var usage = UsageEstimate()
+    @Published var usage = UsageStats()
     @Published var keySource: APIKeySource = .none
     @Published var accounts: [APIKeyAccount] = []
     @Published var activeAccountID: UUID?
     @Published var accountBalances: [UUID: BalanceState] = [:]
     @Published var refreshIntervalMinutes: Int = 5
     @Published var isRefreshing = false
-    @Published var tuiSyncStatus: [UUID: Bool] = [:]
     @Published var updateState: AppUpdateState = .idle
 
     var statusUpdater: ((BalanceState) -> Void)?
@@ -197,8 +194,12 @@ final class AppViewModel: ObservableObject {
     private var timer: Timer?
     private var updateTimer: Timer?
     private var utilityPanel: NSPanel?
+    /// True while the balance is insufficient; used to fire the low-balance
+    /// notification at most once per insufficient period.
+    private var insufficientNotified = false
 
     func start() {
+        BalanceNotifier.requestAuthorizationIfNeeded()
         reloadAccounts()
         scheduleTimer()
         scheduleUpdateTimer()
@@ -225,7 +226,7 @@ final class AppViewModel: ObservableObject {
 
         guard let apiKey, !apiKey.isEmpty else {
             balance = BalanceState(errorMessage: "Add a DeepSeek API key first.")
-            usage = UsageEstimate()
+            usage = UsageStats()
             statusUpdater?(balance)
             return
         }
@@ -238,9 +239,7 @@ final class AppViewModel: ObservableObject {
                 if let total = next.totalBalance {
                     usageTracker.record(balance: total, namespace: usageNamespace)
                 }
-                usage = usageTracker.estimate(currentBalance: next.totalBalance, namespace: usageNamespace)
-                balance = next
-                statusUpdater?(next)
+                applyBalance(next)
             } catch {
                 var failed = balance
                 failed.errorMessage = error.localizedDescription
@@ -258,28 +257,63 @@ final class AppViewModel: ObservableObject {
 
         Task {
             defer { isRefreshing = false }
-            var nextBalances = accountBalances
 
-            for account in accounts {
-                do {
-                    let next = try await api.fetchBalance(apiKey: account.key)
-                    nextBalances[account.id] = next
-                    if let total = next.totalBalance {
-                        usageTracker.record(balance: total, namespace: account.id.uuidString)
+            // Fetch all accounts concurrently (balance endpoint is cheap and
+            // the official concurrency limit is generous).
+            let results = await withTaskGroup(of: (UUID, BalanceState).self, returning: [UUID: BalanceState].self) { group in
+                for account in accounts {
+                    group.addTask { [api] in
+                        do {
+                            let next = try await api.fetchBalance(apiKey: account.key)
+                            if let total = next.totalBalance {
+                                self.usageTracker.record(balance: total, namespace: account.id.uuidString)
+                            }
+                            return (account.id, next)
+                        } catch {
+                            var failed = BalanceState()
+                            failed.errorMessage = error.localizedDescription
+                            failed.updatedAt = Date()
+                            return (account.id, failed)
+                        }
                     }
-                } catch {
-                    var failed = nextBalances[account.id] ?? BalanceState()
-                    failed.errorMessage = error.localizedDescription
-                    failed.updatedAt = Date()
-                    nextBalances[account.id] = failed
                 }
+                var collected: [UUID: BalanceState] = [:]
+                for await (id, state) in group {
+                    collected[id] = state
+                }
+                return collected
+            }
+
+            var nextBalances = accountBalances
+            for (id, state) in results {
+                nextBalances[id] = state
             }
 
             accountBalances = nextBalances
             let activeBalance = activeID.flatMap { nextBalances[$0] } ?? BalanceState(errorMessage: "Add a DeepSeek API key first.")
-            balance = activeBalance
-            usage = usageTracker.estimate(currentBalance: activeBalance.totalBalance, namespace: usageNamespace)
-            statusUpdater?(activeBalance)
+            applyBalance(activeBalance)
+        }
+    }
+
+    /// Applies a freshly fetched balance to the UI and evaluates alerts.
+    private func applyBalance(_ next: BalanceState) {
+        balance = next
+        usage = usageTracker.stats(currentBalance: next.totalBalance, namespace: usageNamespace)
+        statusUpdater?(next)
+        evaluateBalanceAlert(next)
+    }
+
+    /// Fires the insufficient-balance notification at most once per
+    /// insufficient period (re-armed when the balance recovers).
+    private func evaluateBalanceAlert(_ next: BalanceState) {
+        guard next.hasBalance else { return }
+        if next.isAvailable == false {
+            if insufficientNotified == false {
+                BalanceNotifier.notifyInsufficient()
+                insufficientNotified = true
+            }
+        } else {
+            insufficientNotified = false
         }
     }
 
@@ -304,19 +338,13 @@ final class AppViewModel: ObservableObject {
     }
 
     func promptForAPIKey() {
-        showUtilityPanel(size: NSSize(width: 376, height: 400)) {
+        showUtilityPanel(size: NSSize(width: 376, height: 240)) {
             AddAPIKeyPanelView(
                 onCancel: { [weak self] in
                     self?.closeUtilityPanel()
                 },
                 onSave: { [weak self] draft in
-                    self?.saveAPIKey(
-                        draft.key,
-                        name: draft.name,
-                        baseURL: draft.baseURL,
-                        model: draft.model,
-                        tuiProvider: draft.tuiProvider
-                    )
+                    self?.saveAPIKey(draft.key, name: draft.name)
                     self?.closeUtilityPanel()
                 }
             )
@@ -362,16 +390,9 @@ final class AppViewModel: ObservableObject {
         utilityPanel = nil
     }
 
-    func saveAPIKey(
-        _ key: String,
-        name: String = "",
-        baseURL: String = DeepSeekProfilePreset.claudeCodePro1M.baseURL,
-        model: String = DeepSeekProfilePreset.claudeCodePro1M.model,
-        tuiProvider: TUIProviderKind? = nil
-    ) {
+    func saveAPIKey(_ key: String, name: String = "") {
         do {
-            let account = try keyStore.addAccount(name: name, key: key, tuiProvider: tuiProvider)
-            try keyStore.updateAccount(id: account.id, name: account.displayName, baseURL: baseURL, model: model)
+            _ = try keyStore.addAccount(name: name, key: key)
             reloadAccounts()
             refresh()
         } catch {
@@ -385,16 +406,10 @@ final class AppViewModel: ObservableObject {
             reloadAccounts()
             if let cached = accountBalances[account.id] {
                 balance = cached
-                usage = usageTracker.estimate(currentBalance: cached.totalBalance, namespace: usageNamespace)
+                usage = usageTracker.stats(currentBalance: cached.totalBalance, namespace: usageNamespace)
                 statusUpdater?(cached)
             }
             refresh()
-
-            // Auto-sync to TUI if this account has a provider association
-            if account.tuiProvider != nil {
-                try? keyStore.exportToTUI(account: account)
-                tuiSyncStatus[account.id] = true
-            }
         } catch {
             balance = BalanceState(errorMessage: error.localizedDescription)
         }
@@ -409,46 +424,6 @@ final class AppViewModel: ObservableObject {
         } catch {
             balance = BalanceState(errorMessage: error.localizedDescription)
         }
-    }
-
-    func updateActiveAccount(name: String, baseURL: String, model: String) {
-        guard let activeAccount else {
-            return
-        }
-
-        do {
-            try keyStore.updateAccount(id: activeAccount.id, name: name, baseURL: baseURL, model: model)
-            reloadAccounts()
-        } catch {
-            balance = BalanceState(errorMessage: error.localizedDescription)
-        }
-    }
-
-    func applyPreset(_ preset: DeepSeekProfilePreset) {
-        guard let activeAccount else {
-            return
-        }
-
-        do {
-            try keyStore.applyPreset(preset, to: activeAccount.id)
-            reloadAccounts()
-        } catch {
-            balance = BalanceState(errorMessage: error.localizedDescription)
-        }
-    }
-
-    func copyActiveProfileEnv() {
-        guard let activeAccount else {
-            return
-        }
-
-        let env = """
-        export DEEPSEEK_API_KEY="\(activeAccount.key)"
-        export DEEPSEEK_BASE_URL="\(activeAccount.baseURL)"
-        export DEEPSEEK_MODEL="\(activeAccount.model)"
-        """
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(env, forType: .string)
     }
 
     func clearSavedKey() {
@@ -473,40 +448,7 @@ final class AppViewModel: ObservableObject {
             return
         }
         usageTracker.reset(namespace: usageNamespace)
-        usage = usageTracker.estimate(currentBalance: balance.totalBalance, namespace: usageNamespace)
-    }
-
-    // MARK: - TUI Sync
-
-    func importFromTUI() {
-        do {
-            let count = try keyStore.importFromTUI()
-            reloadAccounts()
-            // Refresh to fetch balances for newly imported keys
-            if count > 0 { refresh() }
-        } catch {
-            balance = BalanceState(errorMessage: "TUI import failed: \(error.localizedDescription)")
-        }
-    }
-
-    func syncAccountToTUI(_ account: APIKeyAccount) {
-        do {
-            try keyStore.exportToTUI(account: account)
-        } catch {
-            balance = BalanceState(errorMessage: "TUI sync failed: \(error.localizedDescription)")
-        }
-    }
-
-    func removeAccountFromTUI(_ account: APIKeyAccount) {
-        do {
-            try keyStore.removeFromTUI(account: account)
-        } catch {
-            balance = BalanceState(errorMessage: "TUI remove failed: \(error.localizedDescription)")
-        }
-    }
-
-    func isAccountSyncedToTUI(_ account: APIKeyAccount) -> Bool {
-        tuiSyncStatus[account.id] ?? false
+        usage = usageTracker.stats(currentBalance: balance.totalBalance, namespace: usageNamespace)
     }
 
     func checkForUpdates(automatic: Bool) async {
@@ -545,41 +487,30 @@ final class AppViewModel: ObservableObject {
         let loaded = keyStore.load()
         apiKey = loaded.key
         keySource = loaded.source
-        usage = usageTracker.estimate(currentBalance: balance.totalBalance, namespace: usageNamespace)
-        queueTUISyncCacheRefresh()
-    }
-
-    private func queueTUISyncCacheRefresh() {
-        let currentAccounts = accounts
-        Task.detached(priority: .background) { [weak self] in
-            let store = APIKeyStore()
-            var status: [UUID: Bool] = [:]
-            for account in currentAccounts where account.tuiProvider != nil {
-                status[account.id] = store.isSyncedWithTUI(account: account)
-            }
-            let finalStatus = status
-            await MainActor.run { [weak self] in
-                self?.tuiSyncStatus = finalStatus
-            }
-        }
+        usage = usageTracker.stats(currentBalance: balance.totalBalance, namespace: usageNamespace)
     }
 
     private func scheduleTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: TimeInterval(refreshIntervalMinutes * 60), repeats: true) { [weak self] _ in
+        let newTimer = Timer(timeInterval: TimeInterval(refreshIntervalMinutes * 60), repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refresh()
             }
         }
+        // .common so the timer keeps firing while menus/trackpads are tracked.
+        RunLoop.main.add(newTimer, forMode: .common)
+        timer = newTimer
     }
 
     private func scheduleUpdateTimer() {
         updateTimer?.invalidate()
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in
+        let newTimer = Timer(timeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 await self?.checkForUpdates(automatic: true)
             }
         }
+        RunLoop.main.add(newTimer, forMode: .common)
+        updateTimer = newTimer
     }
 }
 
@@ -588,9 +519,6 @@ final class AppViewModel: ObservableObject {
 struct APIKeyDraft {
     var name: String
     var key: String
-    var baseURL: String
-    var model: String
-    var tuiProvider: TUIProviderKind?
 }
 
 struct AddAPIKeyPanelView: View {
@@ -599,9 +527,6 @@ struct AddAPIKeyPanelView: View {
 
     @State private var name = ""
     @State private var key = ""
-    @State private var selectedPreset = DeepSeekProfilePreset.claudeCodePro1M
-    @State private var baseURL = DeepSeekProfilePreset.claudeCodePro1M.baseURL
-    @State private var selectedProvider: TUIProviderKind?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -615,74 +540,18 @@ struct AddAPIKeyPanelView: View {
                 modalFieldLabel("API Key")
                 SecureField("sk-...", text: $key)
                     .modalTextField()
-
-                modalFieldLabel("Model")
-                HStack(spacing: 6) {
-                    ForEach(DeepSeekProfilePreset.allCases) { preset in
-                        modelButton(preset)
-                    }
-                }
-
-                modalFieldLabel("Base URL")
-                TextField("https://api.deepseek.com/anthropic", text: $baseURL)
-                    .modalTextField()
-
-                modalFieldLabel("TUI Provider (for sync)")
-                HStack(spacing: 4) {
-                    Picker("", selection: $selectedProvider) {
-                        Text("None").tag(nil as TUIProviderKind?)
-                        ForEach(TUIProviderKind.allCases) { provider in
-                            Text(provider.displayName).tag(provider as TUIProviderKind?)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity)
-                }
             }
 
             HStack {
-                Text("URL defaults to DeepSeek's compatible endpoint.")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-                    .lineLimit(2)
-
                 Spacer()
                 modalTextButton("Cancel", action: onCancel)
                 modalPrimaryButton("Save") {
-                    onSave(
-                        APIKeyDraft(
-                            name: name,
-                            key: key,
-                            baseURL: baseURL,
-                            model: selectedPreset.model,
-                            tuiProvider: selectedProvider
-                        )
-                    )
+                    onSave(APIKeyDraft(name: name, key: key))
                 }
                 .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .modalPanelBackground(width: 332)
-    }
-
-    private func modelButton(_ preset: DeepSeekProfilePreset) -> some View {
-        Button {
-            selectedPreset = preset
-            baseURL = preset.baseURL
-        } label: {
-            Text(preset.shortTitle)
-                .font(.system(size: 10, weight: .semibold))
-                .lineLimit(1)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 7)
-                .background(
-                    RoundedRectangle(cornerRadius: 7)
-                        .fill(selectedPreset == preset ? Color.accentColor.opacity(0.20) : Color.secondary.opacity(0.08))
-                )
-        }
-        .buttonStyle(.plain)
-        .focusable(false)
     }
 }
 
@@ -768,6 +637,7 @@ struct ContentView: View {
         }
         .frame(width: 300, height: PopoverSizing.preferredHeight)
         .foregroundStyle(.primary)
+        .background(panelBackgroundColor)
     }
 
     private var header: some View {
@@ -799,6 +669,9 @@ struct ContentView: View {
             if case let .failed(message) = viewModel.updateState {
                 errorBanner("Update check failed: \(message)")
             }
+            if viewModel.balance.hasBalance, !viewModel.balance.isAvailable {
+                warningBanner("Balance insufficient — API calls may fail. Top up at platform.deepseek.com.")
+            }
             accountsCard
             usageCard
             if let error = viewModel.balance.errorMessage {
@@ -815,14 +688,6 @@ struct ContentView: View {
                 Text("API Keys")
                     .font(.system(size: 12, weight: .semibold))
                 Spacer()
-                Button {
-                    viewModel.importFromTUI()
-                } label: {
-                    Text("Import")
-                        .font(.system(size: 10, weight: .medium))
-                }
-                .buttonStyle(.plain)
-                .focusable(false)
                 Button {
                     viewModel.promptForAPIKey()
                 } label: {
@@ -849,20 +714,42 @@ struct ContentView: View {
     }
 
     private var usageCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Estimated Usage")
-                    .font(.system(size: 12, weight: .semibold))
-                Spacer()
-                Button("Reset") {
-                    viewModel.confirmResetUsage()
+        let stats = viewModel.usage
+        let currency = viewModel.balance.currency
+
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Statistics")
+                .font(.system(size: 12, weight: .semibold))
+
+            statRow("Today", used: stats.todayUsed, ratio: spentRatio(spent: stats.todayUsed, balance: stats.balance), color: .deepSeekBlue)
+            statRow("Total", used: stats.totalUsed, ratio: spentRatio(spent: stats.totalUsed, balance: stats.balance), color: .accentColor)
+
+            Divider()
+                .padding(.vertical, 2)
+
+            if stats.dailyAverage > 0 {
+                HStack {
+                    Text("Daily avg")
+                        .font(.system(size: 11, weight: .medium))
+                    Spacer()
+                    Text(daysRemainingText(stats: stats, currency: currency))
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .monospacedDigit()
                 }
-                .buttonStyle(.plain)
-                .focusable(false)
-                .font(.system(size: 10, weight: .medium))
             }
-            usageRow("Today", used: viewModel.usage.todayUsed, budget: viewModel.usage.todayBudget, color: .deepSeekBlue)
-            usageRow("This Month", used: viewModel.usage.monthUsed, budget: viewModel.usage.monthBudget, color: .accentColor)
+
+            if stats.hasSnapshots {
+                balanceSparkline(stats.snapshots)
+            }
+
+            if let split = balanceSplitText(currency: currency) {
+                Text(split)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+
             Text("Local balance snapshots; counts balance drops only.")
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
@@ -871,29 +758,92 @@ struct ContentView: View {
         .cardBackground()
     }
 
-    private func usageRow(_ title: String, used: Double, budget: Double?, color: Color) -> some View {
+    private func statRow(_ title: String, used: Double, ratio: Double?, color: Color) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(title)
                     .font(.system(size: 11, weight: .medium))
                 Spacer()
-                Text("\(used.moneyText) / \(budget?.moneyText ?? "--")")
+                Text(used.moneyText(currency: viewModel.balance.currency))
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .monospacedDigit()
             }
-            GeometryReader { proxy in
-                let ratio = budget.map { $0 > 0 ? min(max(used / $0, 0), 1) : 0 } ?? 0
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.secondary.opacity(0.14))
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(color.opacity(0.78))
-                        .frame(width: max(5, proxy.size.width * ratio))
+            if let ratio {
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.secondary.opacity(0.14))
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(color.opacity(0.78))
+                            .frame(width: max(5, proxy.size.width * min(max(ratio, 0), 1)))
+                    }
+                }
+                .frame(height: 5)
+            }
+        }
+    }
+
+    /// Share of the current balance spent within the period.
+    private func spentRatio(spent: Double, balance: Double?) -> Double? {
+        guard let balance, balance + spent > 0 else { return nil }
+        return spent / (balance + spent)
+    }
+
+    private func daysRemainingText(stats: UsageStats, currency: String) -> String {
+        let avg = stats.dailyAverage.moneyText(currency: currency)
+        guard let days = stats.daysRemaining else {
+            return "Daily avg \(avg)"
+        }
+        let rounded = max(0, Int(days.rounded()))
+        return "\(avg) · ≈\(rounded) day\(rounded == 1 ? "" : "s") left"
+    }
+
+    private func balanceSplitText(currency: String) -> String? {
+        guard let granted = viewModel.balance.grantedBalance,
+              let toppedUp = viewModel.balance.toppedUpBalance else {
+            return nil
+        }
+        return "Granted \(granted.moneyText(currency: currency)) · Topped up \(toppedUp.moneyText(currency: currency))"
+    }
+
+    private func balanceSparkline(_ values: [Double]) -> some View {
+        let minV = values.min() ?? 0
+        let maxV = values.max() ?? 1
+        let span = maxV - minV
+        // Flat history (balance barely moved): a straight line adds no
+        // information, so show a neutral placeholder instead.
+        if span < 0.01 {
+            return AnyView(
+                Text("Balance stable")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(.secondary.opacity(0.8))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 26)
+            )
+        }
+
+        return AnyView(GeometryReader { proxy in
+            let width = proxy.size.width
+            let height = proxy.size.height
+            Path { path in
+                for (index, value) in values.enumerated() {
+                    let x = CGFloat(index) / CGFloat(max(values.count - 1, 1)) * width
+                    let y = height - CGFloat((value - minV) / span) * height
+                    if index == 0 {
+                        path.move(to: CGPoint(x: x, y: y))
+                    } else {
+                        path.addLine(to: CGPoint(x: x, y: y))
+                    }
                 }
             }
-            .frame(height: 5)
+            .stroke(
+                Color.deepSeekBlue.opacity(0.7),
+                style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)
+            )
         }
+        .frame(height: 26)
+        )
     }
 
     private var footer: some View {
@@ -959,27 +909,16 @@ struct ContentView: View {
 
     private func accountRow(_ account: APIKeyAccount) -> some View {
         let isActive = account.id == viewModel.activeAccountID
-        return HStack(alignment: .top, spacing: 7) {
+        return HStack(alignment: .center, spacing: 7) {
             Circle()
                 .fill(isActive ? Color.deepSeekBlue : Color.secondary.opacity(0.35))
                 .frame(width: 6, height: 6)
-                .padding(.top, 6)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(account.displayName)
                         .font(.system(size: 11.5, weight: .semibold))
                         .lineLimit(1)
-
-                    if let provider = account.tuiProvider {
-                        Text(provider.displayName)
-                            .font(.system(size: 8.5, weight: .medium))
-                            .foregroundColor(.tuiGreen)
-                            .padding(.horizontal, 3)
-                            .padding(.vertical, 1)
-                            .background(Color.tuiGreen.opacity(0.12))
-                            .cornerRadius(3)
-                    }
 
                     Spacer(minLength: 4)
 
@@ -994,60 +933,29 @@ struct ContentView: View {
                     .font(.system(size: 9.5, weight: .medium))
                     .foregroundColor(.secondary)
                     .lineLimit(1)
-
-                Text(account.modelDetailText)
-                    .font(.system(size: 9.5))
-                    .foregroundColor(.secondary.opacity(0.9))
-                    .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            VStack(alignment: .trailing, spacing: 10) {
-                if isActive {
-                    Text("Active")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(.deepSeekBlue)
-                } else {
-                    Button("Use") {
-                        viewModel.activateAccount(account)
-                    }
-                    .buttonStyle(.plain)
-                    .focusable(false)
-                    .font(.system(size: 10, weight: .medium))
-                }
-
-                HStack(spacing: 6) {
-                    if account.tuiProvider != nil {
-                        Button {
-                            viewModel.syncAccountToTUI(account)
-                        } label: {
-                            Image(systemName: viewModel.isAccountSyncedToTUI(account) ? "checkmark.icloud" : "icloud.and.arrow.up")
-                                .font(.system(size: 10))
-                        }
-                        .buttonStyle(.plain)
-                        .focusable(false)
-                        .foregroundColor(viewModel.isAccountSyncedToTUI(account) ? .tuiGreen : .secondary)
-                        .help(viewModel.isAccountSyncedToTUI(account) ? "Synced to TUI" : "Sync to TUI")
-                    }
-                    Button {
-                        pendingDeleteAccountID = account.id
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(.system(size: 10))
-                    }
-                    .buttonStyle(.plain)
-                    .focusable(false)
-                    .foregroundColor(.secondary)
-                    .popover(isPresented: deleteConfirmationBinding(for: account)) {
-                        deleteConfirmationPopover(for: account)
-                    }
-                }
+            Button {
+                pendingDeleteAccountID = account.id
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 10))
             }
-            .frame(width: 55, alignment: .trailing)
+            .buttonStyle(.plain)
+            .focusable(false)
+            .foregroundColor(.secondary)
+            .popover(isPresented: deleteConfirmationBinding(for: account)) {
+                deleteConfirmationPopover(for: account)
+            }
         }
-        .frame(height: 54)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            viewModel.activateAccount(account)
+        }
+        .frame(height: 46)
         .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.vertical, 4)
         .background(
             RoundedRectangle(cornerRadius: 6)
                 .fill(isActive ? Color.deepSeekBlue.opacity(0.10) : Color.secondary.opacity(0.06))
@@ -1059,7 +967,7 @@ struct ContentView: View {
             return "--"
         }
         if let total = state.totalBalance {
-            return total.moneyText
+            return total.moneyText(currency: state.currency)
         }
         if state.errorMessage != nil {
             return "Error"
@@ -1136,6 +1044,23 @@ struct ContentView: View {
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color.yellow.opacity(0.10))
+        )
+    }
+
+    private func warningBanner(_ message: String) -> some View {
+        HStack(alignment: .center, spacing: 6) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundColor(.orange)
+            Text(message)
+                .font(.caption)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.orange.opacity(0.10))
         )
     }
 
@@ -1234,6 +1159,9 @@ struct ContentView: View {
         if viewModel.balance.errorMessage != nil {
             return .yellow
         }
+        if viewModel.balance.hasBalance, !viewModel.balance.isAvailable {
+            return .orange
+        }
         return viewModel.balance.hasBalance ? .deepSeekBlue : .white.opacity(0.35)
     }
 
@@ -1306,10 +1234,10 @@ private extension View {
             .padding(16)
             .background(
                 RoundedRectangle(cornerRadius: 18)
-                    .fill(.ultraThinMaterial)
+                    .fill(panelBackgroundColor)
                     .overlay(
                         RoundedRectangle(cornerRadius: 18)
-                            .stroke(Color.secondary.opacity(0.20), lineWidth: 1)
+                            .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
                     )
             )
             .foregroundStyle(.primary)

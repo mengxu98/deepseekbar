@@ -45,7 +45,7 @@ final class DeepSeekAPI: @unchecked Sendable {
     }
 }
 
-enum APIError: LocalizedError {
+enum APIError: LocalizedError, Equatable {
     case invalidResponse
     case invalidKey
     case rateLimited
