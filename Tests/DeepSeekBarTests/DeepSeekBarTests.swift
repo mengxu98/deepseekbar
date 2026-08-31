@@ -247,5 +247,16 @@ final class MoneyFormattingTests: XCTestCase {
     }
 }
 
+@MainActor
+final class AppViewModelSettingsTests: XCTestCase {
+    func testZeroLowBalanceThresholdSurvivesRestart() {
+        let suite = "DeepSeekBarTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(0.0, forKey: "DeepSeekBar.lowBalanceThreshold")
+
+        XCTAssertEqual(AppViewModel(defaults: defaults).lowBalanceThreshold, 0)
+    }
+}
 
 

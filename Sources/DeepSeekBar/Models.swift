@@ -8,6 +8,9 @@ struct BalanceState: Equatable {
     var isAvailable: Bool = false
     var updatedAt: Date?
     var errorMessage: String?
+    /// True when the last refresh failed with 401 (invalid key), so the UI
+    /// can offer replacing the key instead of a generic error.
+    var isKeyInvalid: Bool = false
 
     var hasBalance: Bool {
         totalBalance != nil
@@ -33,9 +36,10 @@ enum DeepSeekOfficialModel {
 // MARK: - Account
 
 /// An API key account. The key itself lives in the Keychain
-/// (service "com.deepseekbar.app", account = account UUID) and is restored
-/// here on decode; the JSON on disk holds metadata only.
-/// (Legacy "tui_provider"/"baseURL"/"model" keys in old state files are ignored.)
+/// (service "com.deepseekbar.app", account = account UUID); the JSON on
+/// disk holds metadata only. APIKeyStore decodes state through its own
+/// envelope and attaches keys from its (injectable) keychain, so decoding
+/// never depends on process-global keychain access.
 struct APIKeyAccount: Identifiable, Equatable, Codable {
     var id: UUID
     var name: String
@@ -49,18 +53,25 @@ struct APIKeyAccount: Identifiable, Equatable, Codable {
         self.createdAt = createdAt
     }
 
+    /// Codable synthesis omits `key` so plaintext keys never reach disk.
     enum CodingKeys: String, CodingKey {
         case id, name, createdAt
     }
 
+    private enum ExtraKeys: String, CodingKey {
+        case key
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let id = try container.decode(UUID.self, forKey: .id)
-        let key = AppKeychainStore.get(account: id.uuidString) ?? ""
+        // `key` is not part of CodingKeys; tolerate a legacy plaintext key
+        // in the JSON (ExtraKeys) without ever re-encoding it.
+        let legacyKey = try? decoder.container(keyedBy: ExtraKeys.self)
+            .decodeIfPresent(String.self, forKey: .key)
         self.init(
-            id: id,
+            id: try container.decode(UUID.self, forKey: .id),
             name: try container.decode(String.self, forKey: .name),
-            key: key,
+            key: legacyKey ?? "",
             createdAt: try container.decode(Date.self, forKey: .createdAt)
         )
     }
@@ -84,6 +95,16 @@ extension String {
     var trimmedNonEmpty: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Compact menu-bar symbol for the currencies the balance API returns.
+    /// Falls back to "" (the tooltip carries the full formatted amount).
+    static func currencySymbol(for code: String) -> String {
+        switch code {
+        case "CNY": return "¥"
+        case "USD": return "$"
+        default: return ""
+        }
     }
 }
 
@@ -123,7 +144,7 @@ extension Double {
         return formatter.string(from: NSNumber(value: self)) ?? "\(currency) \(self)"
     }
 
-    /// Menu-bar-friendly short form: whole yuan above 100, two decimals below.
+    /// Menu-bar-friendly short form: whole amount above 100, two decimals below.
     var compactMoneyText: String {
         if self >= 100 { return String(format: "%.0f", self) }
         return String(format: "%.2f", self)

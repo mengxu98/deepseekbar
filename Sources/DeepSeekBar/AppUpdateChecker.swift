@@ -126,7 +126,7 @@ enum UpdateCheckError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .unexpectedStatus(status):
-            return "GitHub returned HTTP \(status)."
+            return L10n.trf("GitHub returned HTTP %d.", status)
         }
     }
 }

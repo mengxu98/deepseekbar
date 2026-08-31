@@ -308,6 +308,66 @@ codex 有 `model_provider` profile、opencode 有 `opencode.json` provider/model
 
 ---
 
+## 附 8:全面修复迭代(2026-08-30)
+
+针对代码复审发现的问题做了一轮完整修复,`swift build` / `swift test`(36 用例)全绿,版本 v0.0.4 → v0.0.5。
+
+**统计正确性(新发现的真实缺陷)**
+- ✅ §快照上限:`UsageTracker` 原按条数截断(`suffix(1000)`),默认 5 分钟刷新只能存 ~3.5 天历史,月/总消耗随之失真。改为:近 24h 保留原始快照,更早数据按"每小时首条"合并降采样,总量上限 4000 条(≈5 个月)。附多日刷新回归测试。
+- ✅ §误清空历史:余额任何上涨(哪怕 1 分钱赠送)都会 `removeAll()`。改为显著性判定(涨幅 ≥ max(¥1, 余额 1%)才算充值重置),小额漂移不再毁掉历史;`max(0, …)` 钳制吸收误判。附单测。
+
+**并发与线程安全**
+- ✅ `AppViewModel` 标记 `@MainActor`:@Published 突变、`statusUpdater`(NSStatusItem)、UsageTracker 文件读写此前可能发生在后台线程(task-group 子任务/Task)。同时把 `usageTracker.record` 从子任务移回主线程收集后执行。
+- ✅ `DeepSeekAPI` 由 `final class @unchecked Sendable` 改为不可变 `struct Sendable`。
+
+**功能与体验**
+- ✅ 低余额阈值提醒:`BalanceAlerts` 纯策略(每周期最多一次、恢复后重新武装)+ `BalanceNotifier.notifyLowBalance`;设置卡可开关并配置阈值(按账户货币)。
+- ✅ 开机自启:`SMAppService.mainApp` 开关(设置卡),失败时回读服务真实状态,防止开关"说谎"。
+- ✅ 设置持久化:刷新间隔此前每次启动重置为 5 分钟,现与低余额阈值一并存 `UserDefaults`。
+- ✅ 401 处理:`BalanceState.isKeyInvalid` + 专用横幅(Replace 按钮直通添加面板)。
+- ✅ 重命名密钥:`RenameAccountPanelView`(存储层 `updateAccount` 原本就支持,UI 无入口);添加密钥面板错误回显(重复密钥不再静默失败,`APIKeyStoreError.duplicateKey`)。
+- ✅ 首次运行引导:无任何密钥时显示引导卡 + "Add API Key" 主按钮;环境变量来源有独立说明文案。
+- ✅ "Open DeepSeek Console" 头部入口(platform.deepseek.com/usage)。
+- ✅ 菜单栏金额带货币符号(`¥120`/`$42`,按官方 currency 字段)。
+- ✅ 刷新失败 footer 显示 "Failed HH:mm" 而非 "Updated"(失败不再伪装成功)。
+- ✅ Popover 高度:ScrollView 由固定 413pt 改为弹性填充,`clampedHeight` 小屏钳制真正生效。
+- ✅ 无障碍/tooltip:全部图标按钮补 `accessibilityLabel` + 人类可读 `.help`(此前 tooltip 是 "power" 这类 SF Symbol 名)。
+
+**本地化**
+- ✅ `L10n` 助手(英文原文即 key)+ `zh-Hans.lproj/Localizable.strings` 全量翻译(~80 键,脚本校验与代码键一一对应);`build.sh` 复制 `.lproj` 进 Contents/Resources,`Package.swift` 增加 `defaultLocalization: "en"`,Info.plist 增加 `CFBundleDevelopmentRegion`。通知/错误文案一并本地化。
+
+**工程与分发**
+- ✅ 拆分 1320 行单文件:`AppDelegate.swift` / `AppViewModel.swift` / `ContentView.swift` / `Panels.swift` / `Theme.swift`(并删除死代码 `cardTitle()`、`Array[safe:]`)。
+- ✅ `build.sh`:支持 `UNIVERSAL=1`(arm64+x86_64,release workflow 已启用)、`CODESIGN_IDENTITY`、可选 `NOTARYTOOL_PROFILE` 公证+staple 流程。
+- ✅ 测试 16 → 36:新增 BalanceAlerts、UsageTracker 降采样/阈值、APIKeyStore(temp 目录 + 内存 Keychain 注入,含明文迁移与"密钥不落盘"断言)。
+- ✅ README 重写:功能清单、安全模型、安装/构建(含签名钩子)、数据位置、FAQ。
+
+**备注**
+- 刷新间隔菜单与设置卡中的间隔入口并存(前者快捷、后者持久化),未合并。
+- 未实施(留待后续):Homebrew cask、Developer ID 证书申请本身(钩子已就绪)、刷新间隔到达时的 429 退避。
+- `--dark`/`--screenshot` 截图助手修复:macOS 26 上 NSPopover 不再继承 `NSApp.appearance`,需同时钉住 `popover.contentViewController?.view.appearance` 才会渲染深色面板(对照实验:旧版 v0.0.4 同样失效,非本轮引入)。
+- README figures 已用真实截图(浅色/深色、中文系统、真实账户数据)重新生成;由 ImageRenderer 离屏渲染验证的布局与此完全一致。
+
+## 附 9:UI 细节打磨 + 截图管线(2026-08-30,按用户反馈)
+
+- ✅ **菜单栏余额垂直居中**:状态栏按钮里 monospaced 12pt 标题与 16px 模板图标默认仅差 ~0.75pt(亚像素)。曾尝试 `baselineOffset: 2.5` 修正(基于错误的目测),像素实测反而把文字抬过头(差 3.25pt),已撤销;复核后图标与文字中心差 1.5px@2x 居中。
+- ✅ **设置控件焦点圈**:popover 打开时 SwiftUI 自动聚焦第一个可聚焦控件,`低余额提醒` 阈值 TextField 出现蓝色 focus ring(用户反馈的"蓝色框选圈")。TextField 无法既可输入又免自动聚焦,改为 **Stepper(step 0.5, 0...100000)**;两个 Toggle 加 `.focusable(false)`。面板内不再有默认焦点圈。
+- ✅ **popover 高度 500 → 600**:设置卡原本被滚动区裁掉一半,提高高度后完整显示(小屏仍由 `clampedHeight` 自适应,内容仍可滚动)。
+- ✅ **`--demo` 截图模式**:`AppViewModel.seedDemo()` + AppDelegate 分支——合成两个健康账户(Main/Backup)、统计、sparkline,不读 Keychain、不联网、不调度定时器。README figures 从此可控、可复现,不再出现失效密钥的"错误"行,也不受钥匙串授权弹窗(每次重建签名变化会触发)阻塞。
+- ✅ **build.sh 产品路径修复(再次)**:SwiftPM 单架构构建产物实际在 `<scratch>/arm64-apple-macosx/release`,`PRODUCT_DIR` 候选列表补全并按 **mtime 最新** 选取,避免打包到上一次构建的残留二进制(曾导致新代码未进包、`--demo` 不生效)。
+- ✅ README 两张主图重制:599×1200(2x),圆角透明,浅色/深色各一,数据一致(demo 状态)。
+- ✅ 全量测试 37 个全绿;universal 构建 + readiness 通过。
+
+## 附 10:高度自适应 + 设置收进齿轮(2026-08-30,按用户反馈)
+
+- ✅ **popover 高度自适应内容**:固定 600pt 在账户少时留下大片空白。改为 `showPopover` 时取 `NSHostingController.view.fittingSize` 计算自然高度(`clampedHeight(fittingHeight:availableHeight:)`:内容矮 → 贴合内容;内容超屏 → 压缩并由 ScrollView 滚动;不低于 360pt)。README 图从 600pt 高变 ~450pt。
+- ✅ **设置卡移入 footer 齿轮**:正文不再常驻"设置"卡(它也随高度自适应消失),footer「更新于 · 间隔 · 更新检查 · ⚙ · ⏻」;点击齿轮弹出 `SettingsPanelView`(复用 utility panel + modal 样式),含开机自启、低余额提醒(checkbox + 0.5 步进 Stepper + 说明)。新增 L10n 键(`Done`/面板副标题)。设置操作失败仍显示在正文顶部横幅。
+- ✅ **设置改为锚定弹出**(按用户反馈):初版用居中 utility NSPanel,用户要求"在点击设置按钮处弹出"——改为 SwiftUI `.popover` 挂在 footer 齿轮按钮上(与删除确认同模式,系统 popover 提供表面,不再套 modalPanelBackground);`promptForSettings`/居中面板路径删除。
+- ✅ README 两张主图重制(582×900/600×900,2x):紧凑布局、footer 齿轮可见、无空白。
+- ✅ 全量测试 37 个全绿;universal 构建 + readiness 通过;0.0.5 已重新安装(自适应高度 + 齿轮版本)。
+
+---
+
 ## 附：官方信息源
 
 - Get User Balance：https://api-docs.deepseek.com/api/get-user-balance/

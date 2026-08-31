@@ -1,6 +1,7 @@
 import Foundation
 
-final class DeepSeekAPI: @unchecked Sendable {
+/// Immutable value type, so it is safely Sendable without @unchecked.
+struct DeepSeekAPI: Sendable {
     private let endpoint = URL(string: "https://api.deepseek.com/user/balance")!
     private let session: URLSession
 
@@ -55,15 +56,15 @@ enum APIError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidResponse:
-            return "Invalid DeepSeek response."
+            return L10n.tr("Invalid DeepSeek response.")
         case .invalidKey:
-            return "API key is invalid."
+            return L10n.tr("API key is invalid.")
         case .rateLimited:
-            return "Rate limited. Try again later."
+            return L10n.tr("Rate limited. Try again later.")
         case .httpStatus(let status):
-            return "DeepSeek API returned HTTP \(status)."
+            return L10n.trf("DeepSeek API returned HTTP %d.", status)
         case .noBalanceInfo:
-            return "No balance info returned."
+            return L10n.tr("No balance info returned.")
         }
     }
 }

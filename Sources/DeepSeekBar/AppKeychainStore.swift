@@ -8,10 +8,10 @@ import Security
 /// is stored under service "com.deepseekbar.app" with account = account UUID,
 /// which keeps it separate from DeepSeek-TUI's Keychain entries (service
 /// "deepseek").
-enum AppKeychainStore {
+struct AppKeychainStore: KeychainStoring {
     static let service = "com.deepseekbar.app"
 
-    static func get(account: String) -> String? {
+    func get(account: String) -> String? {
         var query = baseQuery(account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -26,7 +26,7 @@ enum AppKeychainStore {
 
     /// Stores or updates a key. Prefers update so no read-modify-write gap
     /// ever leaves the entry missing (unlike delete-then-add).
-    static func set(_ key: String, account: String) throws {
+    func set(_ key: String, account: String) throws {
         let data = Data(key.utf8)
         var query = baseQuery(account: account)
 
@@ -43,14 +43,14 @@ enum AppKeychainStore {
         }
     }
 
-    static func delete(account: String) {
+    func delete(account: String) {
         SecItemDelete(baseQuery(account: account) as CFDictionary)
     }
 
-    private static func baseQuery(account: String) -> [String: Any] {
+    private func baseQuery(account: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: Self.service,
             kSecAttrAccount as String: account,
         ]
     }

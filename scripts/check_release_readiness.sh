@@ -39,12 +39,22 @@ test -f README.md
 test -f LICENSE
 test -f .github/workflows/release.yml
 test -f Package.swift
-test -f Assets/AppIconSource.png
-sips -g pixelWidth -g pixelHeight Assets/AppIconSource.png | grep -q "pixelWidth: 1024"
-sips -g pixelWidth -g pixelHeight Assets/AppIconSource.png | grep -q "pixelHeight: 1024"
+test -f Assets/DeepSeekBar.icon/icon.json
+test -f Assets/DeepSeekBar.icon/Assets/whale.svg
+test -f .build/release/DeepSeekBar.app/Contents/Resources/Assets.car
+test -f .build/release/DeepSeekBar.app/Contents/Resources/DeepSeekBar.icns
+test "$(plutil -extract CFBundleIconName raw .build/release/DeepSeekBar.app/Contents/Info.plist)" = "DeepSeekBar"
 
 echo "== Code signature =="
 codesign --verify --deep --strict --verbose=2 .build/release/DeepSeekBar.app
+
+echo "== Architecture (release binaries are universal) =="
+ARCH_INFO="$(lipo -info .build/release/DeepSeekBar.app/Contents/MacOS/DeepSeekBar)"
+echo "${ARCH_INFO}"
+if ! echo "${ARCH_INFO}" | grep -q "x86_64" || ! echo "${ARCH_INFO}" | grep -q "arm64"; then
+  echo "Release binary must contain both arm64 and x86_64. Build with UNIVERSAL=1 ./build.sh." >&2
+  exit 1
+fi
 
 echo "== DMG =="
 if [[ -f .build/release/DeepSeekBar.dmg ]]; then

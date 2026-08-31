@@ -2,52 +2,65 @@
 set -euo pipefail
 
 APP_NAME="DeepSeekBar"
-APP_VERSION="0.0.4"
+APP_VERSION="0.0.5"
 BUILD_DIR=".build/release"
 APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
 DMG_STAGE="${BUILD_DIR}/dmg"
 DMG_PATH="${BUILD_DIR}/${APP_NAME}.dmg"
-ICON_SOURCE="Assets/AppIconSource.png"
-ICONSET_DIR="${BUILD_DIR}/${APP_NAME}.iconset"
-ICNS_PATH="${BUILD_DIR}/${APP_NAME}.icns"
+ICON_SOURCE="Assets/${APP_NAME}.icon"
+ICON_BUILD_DIR="${BUILD_DIR}/app-icon"
 
-echo "=== Building ${APP_NAME} ==="
+# UNIVERSAL=1 builds an arm64 + x86_64 binary (used by the release workflow).
+# CODESIGN_IDENTITY overrides the signing identity ("-"/ad-hoc by default).
+# NOTARYTOOL_PROFILE=<keychain profile> notarizes + staples before packing
+# the DMG (requires a Developer ID Application signing identity).
+UNIVERSAL="${UNIVERSAL:-0}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+
+echo "=== Building ${APP_NAME} ${APP_VERSION} ==="
 
 mkdir -p "${BUILD_DIR}/module-cache"
-swift build -c release --arch arm64 --scratch-path .build -Xcc -fmodules-cache-path="${BUILD_DIR}/module-cache"
+ARCH_FLAGS=(--arch arm64)
+if [[ "${UNIVERSAL}" == "1" ]]; then
+  echo "Building universal binary (arm64 + x86_64)"
+  ARCH_FLAGS=(--arch arm64 --arch x86_64)
+fi
+PRODUCT_DIR="$(swift build -c release "${ARCH_FLAGS[@]}" --show-bin-path)"
+swift build -c release "${ARCH_FLAGS[@]}" -Xcc -fmodules-cache-path="${BUILD_DIR}/module-cache"
+if [[ ! -x "${PRODUCT_DIR}/${APP_NAME}" ]]; then
+  echo "Built binary not found under ${PRODUCT_DIR}" >&2
+  exit 1
+fi
+echo "Using product at ${PRODUCT_DIR}"
 
 rm -rf "${APP_DIR}"
 mkdir -p "${APP_DIR}/Contents/MacOS"
 mkdir -p "${APP_DIR}/Contents/Resources"
 
-cp "${BUILD_DIR}/${APP_NAME}" "${APP_DIR}/Contents/MacOS/"
+cp "${PRODUCT_DIR}/${APP_NAME}" "${APP_DIR}/Contents/MacOS/"
 
-# Copy bundled resources (menu-bar icon) into Contents/Resources.
-# Loaded via Bundle.main; no SwiftPM resource bundle needed (avoids
-# launch-time "could not load resource bundle" in release builds).
+# Copy bundled resources (menu-bar icon, .lproj strings) into
+# Contents/Resources. Loaded via Bundle.main; no SwiftPM resource bundle
+# needed (avoids launch-time "could not load resource bundle" in release
+# builds).
 RESOURCE_DIR="Sources/${APP_NAME}/Resources"
 if [[ -d "${RESOURCE_DIR}" ]]; then
   cp -R "${RESOURCE_DIR}/." "${APP_DIR}/Contents/Resources/"
 fi
 
-if [[ -f "${ICON_SOURCE}" ]]; then
-  rm -rf "${ICONSET_DIR}"
-  mkdir -p "${ICONSET_DIR}"
-  sips -z 16 16     "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_16x16.png" >/dev/null
-  sips -z 32 32     "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_16x16@2x.png" >/dev/null
-  sips -z 32 32     "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_32x32.png" >/dev/null
-  sips -z 64 64     "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_32x32@2x.png" >/dev/null
-  sips -z 128 128   "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_128x128.png" >/dev/null
-  sips -z 256 256   "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_128x128@2x.png" >/dev/null
-  sips -z 256 256   "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_256x256.png" >/dev/null
-  sips -z 512 512   "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_256x256@2x.png" >/dev/null
-  sips -z 512 512   "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_512x512.png" >/dev/null
-  sips -z 1024 1024 "${ICON_SOURCE}" --out "${ICONSET_DIR}/icon_512x512@2x.png" >/dev/null
-  iconutil -c icns "${ICONSET_DIR}" -o "${ICNS_PATH}"
-  cp "${ICNS_PATH}" "${APP_DIR}/Contents/Resources/${APP_NAME}.icns"
-else
-  echo "Warning: ${ICON_SOURCE} not found; building without a custom app icon."
-fi
+rm -rf "${ICON_BUILD_DIR}"
+mkdir -p "${ICON_BUILD_DIR}"
+xcrun actool \
+  --compile "${ICON_BUILD_DIR}" \
+  --platform macosx \
+  --minimum-deployment-target 13.0 \
+  --app-icon "${APP_NAME}" \
+  --output-partial-info-plist "${ICON_BUILD_DIR}/partial.plist" \
+  --warnings --errors \
+  --output-format human-readable-text \
+  "${ICON_SOURCE}"
+cp "${ICON_BUILD_DIR}/Assets.car" "${APP_DIR}/Contents/Resources/"
+cp "${ICON_BUILD_DIR}/${APP_NAME}.icns" "${APP_DIR}/Contents/Resources/"
 
 cat > "${APP_DIR}/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -64,6 +77,8 @@ cat > "${APP_DIR}/Contents/Info.plist" << PLIST
     <string>${APP_VERSION}</string>
     <key>CFBundleShortVersionString</key>
     <string>${APP_VERSION}</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
     <key>DeepSeekBarGitHubLatestReleaseURL</key>
     <string>https://api.github.com/repos/mengxu98/deepseekbar/releases/latest</string>
     <key>CFBundlePackageType</key>
@@ -71,6 +86,8 @@ cat > "${APP_DIR}/Contents/Info.plist" << PLIST
     <key>CFBundleExecutable</key>
     <string>DeepSeekBar</string>
     <key>CFBundleIconFile</key>
+    <string>DeepSeekBar</string>
+    <key>CFBundleIconName</key>
     <string>DeepSeekBar</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
@@ -83,7 +100,28 @@ cat > "${APP_DIR}/Contents/Info.plist" << PLIST
 PLIST
 
 codesign --remove-signature "${APP_DIR}" 2>/dev/null || true
-codesign --force --deep --sign - "${APP_DIR}"
+if [[ -n "${NOTARYTOOL_PROFILE:-}" ]]; then
+  if [[ "${CODESIGN_IDENTITY}" == "-" ]]; then
+    echo "NOTARYTOOL_PROFILE requires a Developer ID Application identity." >&2
+    exit 1
+  fi
+  codesign --force --deep --options runtime --timestamp --sign "${CODESIGN_IDENTITY}" "${APP_DIR}"
+else
+  codesign --force --deep --sign "${CODESIGN_IDENTITY}" "${APP_DIR}"
+fi
+
+# Optional notarization: submit for approval, then staple the ticket onto
+# the app before the DMG is packed, so Gatekeeper accepts it offline.
+if [[ -n "${NOTARYTOOL_PROFILE:-}" ]]; then
+  echo ""
+  echo "=== Notarizing (profile: ${NOTARYTOOL_PROFILE}) ==="
+  ZIP_PATH="${BUILD_DIR}/${APP_NAME}.zip"
+  rm -f "${ZIP_PATH}"
+  ditto -c -k --keepParent "${APP_DIR}" "${ZIP_PATH}"
+  xcrun notarytool submit "${ZIP_PATH}" --keychain-profile "${NOTARYTOOL_PROFILE}" --wait
+  xcrun stapler staple "${APP_DIR}"
+  rm -f "${ZIP_PATH}"
+fi
 
 echo ""
 echo "=== Creating DMG ==="

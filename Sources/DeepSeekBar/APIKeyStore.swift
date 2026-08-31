@@ -10,9 +10,9 @@ enum APIKeySource: Equatable {
     var label: String {
         switch self {
         case .none:
-            return "Not configured"
+            return L10n.tr("Not configured")
         case .environment:
-            return "Environment"
+            return L10n.tr("Environment")
         case .file(let url), .saved(let url):
             return url.lastPathComponent
         case .account(let name):
@@ -21,25 +21,46 @@ enum APIKeySource: Equatable {
     }
 }
 
+/// Abstraction over the Keychain so APIKeyStore is testable with an
+/// in-memory store; production uses the SecItem implementation.
+protocol KeychainStoring {
+    func set(_ key: String, account: String) throws
+    func get(account: String) -> String?
+    func delete(account: String)
+}
+
 final class APIKeyStore {
     struct State: Codable {
         var accounts: [APIKeyAccount]
         var activeAccountID: UUID?
     }
 
-    private let fileManager = FileManager.default
+    private let fileManager: FileManager
+    private let keychain: KeychainStoring
+    private let baseDirectory: URL
 
-    private var supportDirectory: URL {
-        fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("DeepSeekBar", isDirectory: true)
+    init(
+        fileManager: FileManager = .default,
+        baseDirectory: URL? = nil,
+        keychain: KeychainStoring = AppKeychainStore()
+    ) {
+        self.fileManager = fileManager
+        self.keychain = keychain
+        if let baseDirectory {
+            self.baseDirectory = baseDirectory
+        } else {
+            self.baseDirectory = fileManager
+                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("DeepSeekBar", isDirectory: true)
+        }
     }
 
     private var savedKeyURL: URL {
-        supportDirectory.appendingPathComponent("api_key")
+        baseDirectory.appendingPathComponent("api_key")
     }
 
     private var accountsURL: URL {
-        supportDirectory.appendingPathComponent("api_keys.json")
+        baseDirectory.appendingPathComponent("api_keys.json")
     }
 
     private var candidateURLs: [URL] {
@@ -76,7 +97,11 @@ final class APIKeyStore {
         migrateLegacyKeysIfNeeded()
 
         if let data = try? Data(contentsOf: accountsURL),
-           let state = try? JSONDecoder().decode(State.self, from: data) {
+           var state = try? JSONDecoder().decode(State.self, from: data) {
+            for index in state.accounts.indices {
+                let account = state.accounts[index]
+                state.accounts[index].key = keychain.get(account: account.id.uuidString) ?? account.key
+            }
             return normalized(state)
         }
 
@@ -112,6 +137,9 @@ final class APIKeyStore {
     func addAccount(name: String, key: String) throws -> APIKeyAccount {
         let cleaned = try cleanedKey(key)
         var state = loadState()
+        guard Self.containsKey(cleaned, in: state) == false else {
+            throw APIKeyStoreError.duplicateKey
+        }
         let account = APIKeyAccount(
             id: UUID(),
             name: name.trimmingCharacters(in: .whitespacesAndNewlines).trimmedNonEmpty ?? "Key \(state.accounts.count + 1)",
@@ -122,6 +150,11 @@ final class APIKeyStore {
         state.activeAccountID = account.id
         try saveState(state)
         return account
+    }
+
+    static func containsKey(_ key: String, in state: State) -> Bool {
+        let cleaned = key.trimmedNonEmpty
+        return state.accounts.contains { $0.key.trimmedNonEmpty == cleaned }
     }
 
     func setActiveAccount(id: UUID) throws {
@@ -139,7 +172,7 @@ final class APIKeyStore {
         if state.activeAccountID == id {
             state.activeAccountID = state.accounts.first?.id
         }
-        AppKeychainStore.delete(account: id.uuidString)
+        keychain.delete(account: id.uuidString)
         try saveState(state)
     }
 
@@ -162,7 +195,7 @@ final class APIKeyStore {
     func clearSavedKey() throws {
         var state = loadState()
         if let active = activeAccount(in: state) {
-            AppKeychainStore.delete(account: active.id.uuidString)
+            keychain.delete(account: active.id.uuidString)
             state.accounts.removeAll { $0.id == active.id }
             state.activeAccountID = state.accounts.first?.id
             try saveState(state)
@@ -175,16 +208,19 @@ final class APIKeyStore {
     // MARK: - Private
 
     private func saveState(_ state: State) throws {
-        try fileManager.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
 
         // 1. Secrets live in the Keychain only. APIKeyAccount's CodingKeys
         //    omit `key`, so the JSON below holds metadata exclusively.
         for account in state.accounts {
-            try AppKeychainStore.set(account.key, account: account.id.uuidString)
+            try keychain.set(account.key, account: account.id.uuidString)
         }
 
-        // 2. Metadata → JSON (0600, atomic).
-        let data = try JSONEncoder().encode(normalized(state))
+        try saveMetadata(normalized(state))
+    }
+
+    private func saveMetadata(_ state: State) throws {
+        let data = try JSONEncoder().encode(state)
         try data.write(to: accountsURL, options: .atomic)
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: accountsURL.path)
     }
@@ -195,25 +231,19 @@ final class APIKeyStore {
     private func migrateLegacyKeysIfNeeded() {
         guard let data = try? Data(contentsOf: accountsURL) else { return }
 
-        struct LegacyAccount: Decodable {
-            let id: UUID
-            let key: String?
-        }
-        struct LegacyState: Decodable {
-            let accounts: [LegacyAccount]
-        }
-
-        guard let legacy = try? JSONDecoder().decode(LegacyState.self, from: data) else { return }
-        let plaintextKeys = legacy.accounts.filter { $0.key?.isEmpty == false }
+        guard let state = try? JSONDecoder().decode(State.self, from: data) else { return }
+        let plaintextKeys = state.accounts.filter { $0.key.trimmedNonEmpty != nil }
         guard !plaintextKeys.isEmpty else { return }
 
-        for account in plaintextKeys {
-            try? AppKeychainStore.set(account.key!, account: account.id.uuidString)
-        }
-        // Rewrite without plaintext keys (APIKeyAccount decodes the key back
-        // from the Keychain, so the round-trip preserves the accounts).
-        if let state = try? JSONDecoder().decode(State.self, from: data) {
-            try? saveState(state)
+        do {
+            for account in plaintextKeys {
+                try keychain.set(account.key, account: account.id.uuidString)
+            }
+            // Rewrite metadata without calling saveState: accounts already
+            // backed only by Keychain must never be overwritten with "".
+            try saveMetadata(state)
+        } catch {
+            return
         }
     }
 
@@ -245,11 +275,14 @@ final class APIKeyStore {
 
 enum APIKeyStoreError: LocalizedError {
     case emptyKey
+    case duplicateKey
 
     var errorDescription: String? {
         switch self {
         case .emptyKey:
-            return "API key must not be empty."
+            return L10n.tr("API key must not be empty.")
+        case .duplicateKey:
+            return L10n.tr("This API key is already saved.")
         }
     }
 }

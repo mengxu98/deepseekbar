@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "DeepSeekBar",
+    defaultLocalization: "en",
     platforms: [
         .macOS(.v13)
     ],
@@ -12,7 +13,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "DeepSeekBar",
-            path: "Sources/DeepSeekBar"
+            path: "Sources/DeepSeekBar",
+            exclude: ["Resources/tray-icon.png"]
         ),
         .testTarget(
             name: "DeepSeekBarTests",

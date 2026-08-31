@@ -22,10 +22,20 @@ struct UsageStats: Equatable {
 }
 
 final class UsageTracker {
-    private struct Snapshot: Codable {
+    /// One balance observation. Internal (not private) so tests can build
+    /// backdated histories.
+    struct Snapshot: Codable, Equatable {
         let date: Date
         let balance: Double
     }
+
+    /// Snapshots newer than this window stay raw; older ones are coalesced
+    /// into first-of-hour buckets. Without coalescing, the fixed snapshot
+    /// cap would expire the month/total baselines for anyone refreshing
+    /// more often than every ~7 minutes.
+    static let rawWindow: TimeInterval = 24 * 60 * 60
+    /// Hard cap on stored snapshots (~5 months of hourly buckets).
+    static let maxSnapshots = 4_000
 
     private let fileManager: FileManager
     private let calendar: Calendar
@@ -51,13 +61,23 @@ final class UsageTracker {
         baseDirectory.appendingPathComponent("balance_snapshots_\(safeNamespace(namespace)).json")
     }
 
-    func record(balance: Double, namespace: String) {
+    func record(balance: Double, namespace: String, date: Date = Date()) {
         var snapshots = loadSnapshots(namespace: namespace)
-        if let last = snapshots.last, balance > last.balance {
+        if let last = snapshots.last, Self.isSignificantTopUp(new: balance, previous: last.balance) {
             snapshots.removeAll()
         }
-        snapshots.append(Snapshot(date: Date(), balance: balance))
-        saveSnapshots(snapshots.suffix(1_000), namespace: namespace)
+        snapshots.append(Snapshot(date: date, balance: balance))
+        saveSnapshots(downsampled(snapshots, now: date), namespace: namespace)
+    }
+
+    /// A rise in balance means a top-up (or a granted drip). Only a
+    /// significant rise resets the baseline so a few-cent grant cannot wipe
+    /// months of history. Trade-off: a top-up smaller than the threshold
+    /// shows up as negative usage, which max(0, …) clamps to zero.
+    static func isSignificantTopUp(new: Double, previous: Double) -> Bool {
+        let increase = new - previous
+        guard increase > 0 else { return false }
+        return increase >= max(1, previous * 0.01)
     }
 
     /// Computes usage statistics for the current balance.
@@ -102,6 +122,34 @@ final class UsageTracker {
         try? fileManager.removeItem(at: snapshotsURL(namespace: namespace))
     }
 
+    /// Keeps raw snapshots for the recent window and first-of-hour buckets
+    /// for older data. First-of-hour preserves the "balance at period start"
+    /// semantics that stats() baselines rely on, and is idempotent across
+    /// repeated records.
+    func downsampled(_ snapshots: [Snapshot], now: Date = Date()) -> [Snapshot] {
+        let cutoff = now.addingTimeInterval(-Self.rawWindow)
+        let split = snapshots.firstIndex(where: { $0.date >= cutoff }) ?? snapshots.endIndex
+        var older = Array(snapshots[..<split])
+        if older.count > 1 {
+            older = hourlyFirstBuckets(older)
+        }
+        let recent = Array(snapshots[split...])
+        return Array((older + recent).suffix(Self.maxSnapshots))
+    }
+
+    private func hourlyFirstBuckets(_ snapshots: [Snapshot]) -> [Snapshot] {
+        var result: [Snapshot] = []
+        var currentHour: Date?
+        for snapshot in snapshots {
+            let hour = calendar.dateInterval(of: .hour, for: snapshot.date)?.start ?? snapshot.date
+            if hour != currentHour {
+                result.append(snapshot)
+                currentHour = hour
+            }
+        }
+        return result
+    }
+
     private func baseline(in snapshots: [Snapshot], since start: Date) -> Double? {
         snapshots.first(where: { $0.date >= start })?.balance
     }
@@ -113,14 +161,14 @@ final class UsageTracker {
         return (try? JSONDecoder().decode([Snapshot].self, from: data)) ?? []
     }
 
-    private func saveSnapshots<S: Sequence>(_ snapshots: S, namespace: String) where S.Element == Snapshot {
+    private func saveSnapshots(_ snapshots: [Snapshot], namespace: String) {
         let url = snapshotsURL(namespace: namespace)
         let dir = url.deletingLastPathComponent()
         try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
-        let data = try? JSONEncoder().encode(Array(snapshots))
-        if let data {
-            try? data.write(to: url, options: .atomic)
+        guard let data = try? JSONEncoder().encode(snapshots) else {
+            return
         }
+        try? data.write(to: url, options: .atomic)
     }
 
     private func safeNamespace(_ namespace: String) -> String {
