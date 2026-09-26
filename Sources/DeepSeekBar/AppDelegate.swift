@@ -12,8 +12,8 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
         configureMainMenu()
         configureStatusItem()
         configurePopover()
-        viewModel.statusUpdater = { [weak self] balance in
-            self?.updateStatusItem(balance: balance)
+        viewModel.onStatusItemChange = { [weak self] in
+            self?.renderStatusItem()
         }
         if CommandLine.arguments.contains("--demo") {
             // README figure mode: synthetic healthy state, no Keychain/network.
@@ -110,7 +110,7 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
             button.image = logo
             button.imagePosition = .imageLeading
         }
-        button.attributedTitle = Self.makeStatusTitle("")
+        button.attributedTitle = Self.makeStatusTitle([])
         button.toolTip = "DeepSeekBar"
         button.action = #selector(togglePopover)
         button.target = self
@@ -125,7 +125,12 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
         popover.animates = true
         popover.contentSize = NSSize(width: PopoverSizing.width, height: PopoverSizing.preferredHeight)
         popover.contentViewController = NSHostingController(
-            rootView: ContentView(viewModel: viewModel)
+            rootView: ContentView(
+                viewModel: viewModel,
+                onContentSizeChange: { [weak self] in
+                    self?.resizePopoverToFitContent()
+                }
+            )
         )
     }
 
@@ -140,18 +145,45 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
         // Size the popover to the content's natural height (a short list
         // leaves no dead space); the body ScrollView takes over scrolling
         // when content exceeds the screen.
+        applyFittingPopoverSize()
+        NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+    }
+
+    /// Re-sizes the open popover after the body's natural height changed
+    /// (inline rename / add-key forms). Deferred by one runloop turn so the
+    /// SwiftUI layout pass has already produced the new fitting size.
+    private func resizePopoverToFitContent() {
+        guard popover.isShown else {
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.popover.isShown else {
+                return
+            }
+            self.applyFittingPopoverSize()
+        }
+    }
+
+    private func applyFittingPopoverSize() {
+        // Plain `fittingSize` of the hosting view: forcing a layout pass
+        // first makes it under-report (the ScrollView has not been given
+        // its width yet), which clipped the bottom of the body.
         let fittingHeight = popover.contentViewController?.view.fittingSize.height
             ?? PopoverSizing.preferredHeight
-        popover.contentSize = NSSize(
+        let target = NSSize(
             width: PopoverSizing.width,
             height: PopoverSizing.clampedHeight(
                 fittingHeight: fittingHeight,
                 availableHeight: availablePopoverHeightBelowStatusItem()
             )
         )
-        NSApp.activate(ignoringOtherApps: true)
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKey()
+        // Sub-point changes would just thrash the layout.
+        guard abs(popover.contentSize.height - target.height) > 0.5 else {
+            return
+        }
+        popover.contentSize = target
     }
 
     private func availablePopoverHeightBelowStatusItem() -> CGFloat? {
@@ -167,28 +199,19 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
-    private func updateStatusItem(balance: BalanceState) {
+    /// Renders the menu-bar item from view-model state so the balance and
+    /// pricing callbacks cannot drift apart.
+    private func renderStatusItem() {
         guard let button = statusItem.button else {
             return
         }
-
-        if let error = balance.errorMessage {
-            button.attributedTitle = Self.makeStatusTitle("DS!", color: .systemYellow)
-            button.toolTip = error
-        } else if let total = balance.totalBalance {
-            let amount = "\(String.currencySymbol(for: balance.currency))\(total.compactMoneyText)"
-            if balance.isAvailable {
-                button.attributedTitle = Self.makeStatusTitle(amount)
-                button.toolTip = "DeepSeekBar · \(total.moneyText(currency: balance.currency))"
-            } else {
-                // Balance exists but is insufficient for API calls.
-                button.attributedTitle = Self.makeStatusTitle("\(amount)!", color: .systemOrange)
-                button.toolTip = L10n.tr("Balance insufficient for API calls. Top up at platform.deepseek.com.")
-            }
-        } else {
-            button.attributedTitle = Self.makeStatusTitle("DS")
-            button.toolTip = "DeepSeekBar"
-        }
+        let presentation = MenuBarPresentation(
+            balance: viewModel.balance,
+            pricing: viewModel.showPricingInMenuBar ? viewModel.pricing : nil,
+            showsPricingCountdown: viewModel.showPricingCountdownInMenuBar
+        )
+        button.attributedTitle = Self.makeStatusTitle(presentation.segments)
+        button.toolTip = presentation.tooltip
     }
 
     /// Menu-bar icon from the official deepseek-harness-desktop app
@@ -206,13 +229,27 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
         return image
     }()
 
-    private static func makeStatusTitle(_ text: String, color: NSColor = .labelColor) -> NSAttributedString {
-        NSAttributedString(
-            string: text,
-            attributes: [
-                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
-                .foregroundColor: color
-            ]
-        )
+    private static func makeStatusTitle(_ segments: [MenuBarPresentation.Segment]) -> NSAttributedString {
+        let title = NSMutableAttributedString()
+        for segment in segments {
+            title.append(NSAttributedString(
+                string: segment.text,
+                attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
+                    .foregroundColor: color(for: segment.emphasis)
+                ]
+            ))
+        }
+        return title
+    }
+
+    private static func color(for emphasis: MenuBarPresentation.Emphasis) -> NSColor {
+        switch emphasis {
+        case .primary: return .labelColor
+        case .secondary: return .secondaryLabelColor
+        case .pricing: return .systemBlue
+        case .caution: return .systemOrange
+        case .warning: return .systemYellow
+        }
     }
 }

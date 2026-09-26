@@ -17,16 +17,87 @@ enum PopoverSizing {
     }
 }
 
+// MARK: - Design tokens
+
+/// Four text sizes — hierarchy comes from weight and colour, not from a
+/// long tail of one-off sizes.
+enum DSFont {
+    /// The one big number (active balance).
+    static let hero = Font.system(size: 17, weight: .semibold)
+    /// Window/popover titles.
+    static let title = Font.system(size: 13, weight: .semibold)
+    /// Card headers.
+    static let section = Font.system(size: 12, weight: .semibold)
+
+    static let body = Font.system(size: 12)
+    static let bodyMedium = Font.system(size: 12, weight: .medium)
+    static let bodySemibold = Font.system(size: 12, weight: .semibold)
+
+    static let caption = Font.system(size: 11)
+    static let captionMedium = Font.system(size: 11, weight: .medium)
+    static let captionSemibold = Font.system(size: 11, weight: .semibold)
+}
+
+/// 4-pt spacing grid.
+enum DSSpacing {
+    static let xxs: CGFloat = 2
+    static let xs: CGFloat = 4
+    static let s: CGFloat = 8
+    static let m: CGFloat = 12
+    static let l: CGFloat = 16
+}
+
+/// Corner radii: rows, controls, cards, utility panels.
+enum DSRadius {
+    static let row: CGFloat = 6
+    static let control: CGFloat = 8
+    static let card: CGFloat = 10
+    static let panel: CGFloat = 16
+}
+
+private func dsRGB(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat, _ alpha: CGFloat = 1) -> NSColor {
+    NSColor(srgbRed: red, green: green, blue: blue, alpha: alpha)
+}
+
+/// A colour that resolves per appearance. A menu-bar app has no regular
+/// window, so `NSApp.effectiveAppearance` is unreliable; resolving against
+/// the view's own appearance is not.
+private func dsDynamic(light: NSColor, dark: NSColor) -> Color {
+    Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+    })
+}
+
+// MARK: - Palette
+
 extension Color {
-    static let deepSeekBlue = Color(red: 0.10, green: 0.45, blue: 0.88)
+    /// Brand: active account, off-peak pricing, today's spend.
+    static let dsBlue = dsDynamic(light: dsRGB(0.10, 0.45, 0.88), dark: dsRGB(0.38, 0.66, 1.00))
+    /// Cumulative totals — same family as the brand hue, clearly secondary.
+    static let dsIndigo = dsDynamic(light: dsRGB(0.35, 0.34, 0.80), dark: dsRGB(0.60, 0.58, 0.98))
+    /// Peak pricing and low-balance attention.
+    static let dsAmber = dsDynamic(light: dsRGB(0.76, 0.46, 0.00), dark: dsRGB(1.00, 0.72, 0.30))
+    /// Granted (free) credit.
+    static let dsGreen = dsDynamic(light: dsRGB(0.09, 0.52, 0.34), dark: dsRGB(0.35, 0.82, 0.56))
+    /// Errors — invalid key, failed refresh.
+    static let dsRed = dsDynamic(light: dsRGB(0.76, 0.20, 0.17), dark: dsRGB(1.00, 0.46, 0.42))
+
+    /// Surfaces. Fixed opacities instead of `secondary`, whose dark-mode
+    /// value is too faint to read as a card.
+    static let dsCardFill = dsDynamic(light: dsRGB(0, 0, 0, 0.035), dark: dsRGB(1, 1, 1, 0.060))
+    static let dsRowFill = dsDynamic(light: dsRGB(0, 0, 0, 0.030), dark: dsRGB(1, 1, 1, 0.050))
+    static let dsControlFill = dsDynamic(light: dsRGB(0, 0, 0, 0.060), dark: dsRGB(1, 1, 1, 0.090))
+    static let dsBorder = dsDynamic(light: dsRGB(0, 0, 0, 0.080), dark: dsRGB(1, 1, 1, 0.100))
+
+    /// Accent washes for cards and banners.
+    static let dsBlueTint = dsDynamic(light: dsRGB(0.10, 0.45, 0.88, 0.10), dark: dsRGB(0.38, 0.66, 1.00, 0.14))
+    static let dsAmberTint = dsDynamic(light: dsRGB(0.76, 0.46, 0.00, 0.10), dark: dsRGB(1.00, 0.72, 0.30, 0.14))
+    static let dsGreenTint = dsDynamic(light: dsRGB(0.09, 0.52, 0.34, 0.10), dark: dsRGB(0.35, 0.82, 0.56, 0.15))
+    static let dsRedTint = dsDynamic(light: dsRGB(0.76, 0.20, 0.17, 0.10), dark: dsRGB(1.00, 0.46, 0.42, 0.16))
 }
 
 /// Popover/panel surface: clean white in light mode; the system dark
 /// surface in dark mode so sheets don't glare inside a dark UI.
-/// A dynamic NSColor resolves against the view's appearance, which follows
-/// the system for a menu-bar app. (A computed color keyed off
-/// NSApp.effectiveAppearance is unreliable here: a menu-bar app has no
-/// regular window, so NSApp.effectiveAppearance can stay light in dark mode.)
 let panelBackgroundColor = Color(nsColor: NSColor(name: nil) { appearance in
     appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         ? NSColor.windowBackgroundColor
@@ -37,11 +108,11 @@ let panelBackgroundColor = Color(nsColor: NSColor(name: nil) { appearance in
 
 @MainActor
 func modalHeader(_ title: String, subtitle: String) -> some View {
-    VStack(alignment: .leading, spacing: 4) {
+    VStack(alignment: .leading, spacing: DSSpacing.xs) {
         Text(title)
-            .font(.system(size: 14, weight: .semibold))
+            .font(DSFont.title)
         Text(subtitle)
-            .font(.system(size: 10.5))
+            .font(DSFont.caption)
             .foregroundColor(.secondary)
             .lineLimit(2)
     }
@@ -50,7 +121,7 @@ func modalHeader(_ title: String, subtitle: String) -> some View {
 @MainActor
 func modalFieldLabel(_ title: String) -> some View {
     Text(title)
-        .font(.system(size: 10, weight: .medium))
+        .font(DSFont.captionMedium)
         .foregroundColor(.secondary)
 }
 
@@ -58,13 +129,13 @@ func modalFieldLabel(_ title: String) -> some View {
 func modalTextButton(_ title: String, action: @escaping () -> Void) -> some View {
     Button(action: action) {
         Text(title)
-            .font(.system(size: 11, weight: .semibold))
+            .font(DSFont.bodySemibold)
             .foregroundColor(.primary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
+            .padding(.horizontal, DSSpacing.m)
+            .padding(.vertical, DSSpacing.s)
             .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.secondary.opacity(0.10))
+                RoundedRectangle(cornerRadius: DSRadius.control)
+                    .fill(Color.dsControlFill)
             )
     }
     .buttonStyle(.plain)
@@ -75,13 +146,13 @@ func modalTextButton(_ title: String, action: @escaping () -> Void) -> some View
 func modalPrimaryButton(_ title: String, action: @escaping () -> Void) -> some View {
     Button(action: action) {
         Text(title)
-            .font(.system(size: 11, weight: .semibold))
+            .font(DSFont.bodySemibold)
             .foregroundColor(.white)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
+            .padding(.horizontal, DSSpacing.l)
+            .padding(.vertical, DSSpacing.s)
             .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.accentColor.opacity(0.88))
+                RoundedRectangle(cornerRadius: DSRadius.control)
+                    .fill(Color.dsBlue)
             )
     }
     .buttonStyle(.plain)
@@ -91,13 +162,13 @@ func modalPrimaryButton(_ title: String, action: @escaping () -> Void) -> some V
 extension View {
     func modalPanelBackground(width: CGFloat) -> some View {
         frame(width: width)
-            .padding(16)
+            .padding(DSSpacing.l)
             .background(
-                RoundedRectangle(cornerRadius: 18)
+                RoundedRectangle(cornerRadius: DSRadius.panel)
                     .fill(panelBackgroundColor)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 18)
-                            .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: DSRadius.panel)
+                            .stroke(Color.dsBorder, lineWidth: 1)
                     )
             )
             .foregroundStyle(.primary)
@@ -105,21 +176,33 @@ extension View {
 
     func modalTextField() -> some View {
         textFieldStyle(.plain)
-            .font(.system(size: 11, weight: .medium))
-            .padding(.horizontal, 9)
-            .padding(.vertical, 7)
+            .font(DSFont.bodyMedium)
+            .padding(.horizontal, DSSpacing.s)
+            .padding(.vertical, DSSpacing.s)
             .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.secondary.opacity(0.08))
+                RoundedRectangle(cornerRadius: DSRadius.control)
+                    .fill(Color.dsControlFill)
             )
     }
 
-    func cardBackground() -> some View {
-        padding(.horizontal, 12)
-            .padding(.vertical, 10)
+    /// A row nested inside a card (account rows, inline editors).
+    func rowBackground() -> some View {
+        padding(.horizontal, DSSpacing.s)
+            .padding(.vertical, DSSpacing.s)
             .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.secondary.opacity(0.06))
+                RoundedRectangle(cornerRadius: DSRadius.row)
+                    .fill(Color.dsRowFill)
+            )
+    }
+
+    /// Standard card surface. `fill` lets the pricing card carry its
+    /// period colour without duplicating the chrome.
+    func cardBackground(fill: Color = .dsCardFill) -> some View {
+        padding(.horizontal, DSSpacing.m)
+            .padding(.vertical, DSSpacing.m)
+            .background(
+                RoundedRectangle(cornerRadius: DSRadius.card)
+                    .fill(fill)
             )
     }
 }

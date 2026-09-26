@@ -5,157 +5,259 @@ struct APIKeyDraft {
     var key: String
 }
 
-struct AddAPIKeyPanelView: View {
-    /// Saves the draft; returns an error message to display (panel stays
-    /// open) or nil on success (panel closes).
+/// Inline "add API key" form. Rendered inside the popover (account card or
+/// onboarding card) instead of a separate floating panel, so the whole flow
+/// happens in one place.
+struct InlineKeyEditor: View {
+    /// Returns an error message to display (the form stays open) or nil on
+    /// success (the caller collapses the form).
     var onSave: (APIKeyDraft) -> String?
     var onCancel: () -> Void
 
     @State private var name = ""
     @State private var key = ""
     @State private var errorMessage: String?
+    @FocusState private var focusedField: Field?
+
+    private enum Field: Hashable {
+        case name
+        case key
+    }
+
+    private var trimmedKey: String {
+        key.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            modalHeader(L10n.tr("Add API Key"), subtitle: L10n.tr("Stored in the macOS Keychain."))
-
-            VStack(alignment: .leading, spacing: 9) {
-                modalFieldLabel(L10n.tr("Name"))
-                TextField(L10n.tr("Default"), text: $name)
-                    .modalTextField()
-
-                modalFieldLabel(L10n.tr("API Key"))
-                SecureField("sk-...", text: $key)
-                    .modalTextField()
-
-                if !key.isEmpty, !key.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("sk-") {
-                    Text(L10n.tr("Official DeepSeek keys start with “sk-”."))
-                        .font(.system(size: 9.5))
-                        .foregroundColor(.secondary)
-                }
-
-                if let errorMessage {
-                    Text(errorMessage)
-                        .font(.system(size: 10))
-                        .foregroundColor(.red)
-                        .lineLimit(2)
-                }
-            }
+        VStack(alignment: .leading, spacing: DSSpacing.s) {
+            modalFieldLabel(L10n.tr("Name"))
+            TextField(L10n.tr("Default"), text: $name)
+                .modalTextField()
+                .focused($focusedField, equals: .name)
+                .onSubmit { focusedField = .key }
 
             HStack {
+                modalFieldLabel(L10n.tr("API Key"))
+                Spacer()
+                Text(L10n.tr("Stored in the macOS Keychain."))
+                    .font(DSFont.caption)
+                    .foregroundColor(.secondary)
+            }
+            SecureField("sk-...", text: $key)
+                .modalTextField()
+                .focused($focusedField, equals: .key)
+                .onSubmit(save)
+                .onExitCommand(perform: onCancel)
+
+            if !key.isEmpty, !trimmedKey.hasPrefix("sk-") {
+                Text(L10n.tr("Official DeepSeek keys start with “sk-”."))
+                    .font(DSFont.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(DSFont.caption)
+                    .foregroundColor(.dsRed)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: DSSpacing.s) {
                 Spacer()
                 modalTextButton(L10n.tr("Cancel"), action: onCancel)
-                modalPrimaryButton(L10n.tr("Save")) {
-                    errorMessage = onSave(APIKeyDraft(name: name, key: key))
-                }
-                .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                modalPrimaryButton(L10n.tr("Save"), action: save)
+                    .disabled(trimmedKey.isEmpty)
             }
         }
-        .modalPanelBackground(width: 332)
+        .onAppear { focusedField = .name }
+    }
+
+    private func save() {
+        guard !trimmedKey.isEmpty else { return }
+        errorMessage = onSave(APIKeyDraft(name: name, key: key))
     }
 }
 
-struct RenameAccountPanelView: View {
-    let account: APIKeyAccount
-    /// Saves the new name; returns an error message to display or nil on
-    /// success (panel closes).
+/// Inline rename field that replaces an account row while editing.
+struct InlineRenameField: View {
+    let maskedKey: String
+    /// Returns an error message to display (editing continues) or nil on
+    /// success.
     var onSave: (String) -> String?
     var onCancel: () -> Void
 
     @State private var name: String
     @State private var errorMessage: String?
+    @FocusState private var isFocused: Bool
 
-    init(account: APIKeyAccount, onSave: @escaping (String) -> String?, onCancel: @escaping () -> Void) {
-        self.account = account
+    init(
+        initialName: String,
+        maskedKey: String,
+        onSave: @escaping (String) -> String?,
+        onCancel: @escaping () -> Void
+    ) {
+        self.maskedKey = maskedKey
         self.onSave = onSave
         self.onCancel = onCancel
-        _name = State(initialValue: account.name)
+        _name = State(initialValue: initialName)
+    }
+
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            modalHeader(L10n.tr("Rename Key"), subtitle: account.maskedKey)
-
-            VStack(alignment: .leading, spacing: 9) {
-                modalFieldLabel(L10n.tr("Name"))
-                TextField(account.displayName, text: $name)
+        VStack(alignment: .leading, spacing: DSSpacing.xs) {
+            HStack(spacing: DSSpacing.s) {
+                TextField(L10n.tr("Name"), text: $name)
                     .modalTextField()
+                    .focused($isFocused)
+                    .onSubmit(save)
+                    .onExitCommand(perform: onCancel)
+                    .accessibilityLabel(L10n.tr("Name"))
 
-                if let errorMessage {
-                    Text(errorMessage)
-                        .font(.system(size: 10))
-                        .foregroundColor(.red)
-                        .lineLimit(2)
+                Button(action: save) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(DSFont.body)
+                        .foregroundColor(trimmedName.isEmpty ? .secondary : .dsBlue)
                 }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .disabled(trimmedName.isEmpty)
+                .help(L10n.tr("Save"))
+                .accessibilityLabel(L10n.tr("Save"))
+
+                Button(action: onCancel) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(DSFont.body)
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .help(L10n.tr("Cancel"))
+                .accessibilityLabel(L10n.tr("Cancel"))
             }
 
-            HStack {
-                Spacer()
-                modalTextButton(L10n.tr("Cancel"), action: onCancel)
-                modalPrimaryButton(L10n.tr("Save")) {
-                    errorMessage = onSave(name)
-                }
-                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(DSFont.caption)
+                    .foregroundColor(.dsRed)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(maskedKey)
+                    .font(DSFont.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
             }
         }
-        .modalPanelBackground(width: 288)
+        .onAppear { isFocused = true }
+    }
+
+    private func save() {
+        guard !trimmedName.isEmpty else { return }
+        errorMessage = onSave(trimmedName)
     }
 }
 
-/// Settings content shown in an anchored popover on the footer gear button
-/// (system popover provides the surface, so no modal panel chrome here).
-struct SettingsPanelView: View {
+/// Settings shown as a card inside the popover body (the footer gear swaps
+/// the body for this page — no anchored popover).
+struct SettingsCard: View {
     @ObservedObject var viewModel: AppViewModel
     var onDone: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: DSSpacing.m) {
             modalHeader(L10n.tr("Settings"), subtitle: L10n.tr("Menu bar preferences for DeepSeekBar."))
 
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: DSSpacing.m) {
+                VStack(alignment: .leading, spacing: DSSpacing.xs) {
+                    Toggle(isOn: Binding(
+                        get: { viewModel.showPricingInMenuBar },
+                        set: { viewModel.setShowPricingInMenuBar($0) }
+                    )) {
+                        Text(L10n.tr("Show peak / off-peak in the menu bar"))
+                            .font(DSFont.bodyMedium)
+                    }
+                    .toggleStyle(.checkbox)
+                    .focusable(false)
+                    .accessibilityLabel(L10n.tr("Show peak / off-peak in the menu bar"))
+
+                    Toggle(isOn: Binding(
+                        get: { viewModel.showPricingCountdownInMenuBar },
+                        set: { viewModel.setShowPricingCountdownInMenuBar($0) }
+                    )) {
+                        Text(L10n.tr("Show countdown to the next price change"))
+                            .font(DSFont.bodyMedium)
+                    }
+                    .toggleStyle(.checkbox)
+                    .focusable(false)
+                    .disabled(!viewModel.showPricingInMenuBar)
+                    .accessibilityLabel(L10n.tr("Show countdown to the next price change"))
+
+                    Text(L10n.tr("Off-peak shows ½, peak shows ×1; DeepSeek sets prices in Beijing time."))
+                        .font(DSFont.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 Toggle(isOn: Binding(
                     get: { viewModel.launchAtLoginEnabled },
                     set: { viewModel.toggleLaunchAtLogin($0) }
                 )) {
                     Text(L10n.tr("Launch at login"))
-                        .font(.system(size: 11, weight: .medium))
+                        .font(DSFont.bodyMedium)
                 }
                 .toggleStyle(.checkbox)
                 .focusable(false)
                 .accessibilityLabel(L10n.tr("Launch at login"))
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle(isOn: Binding(
-                        get: { viewModel.lowBalanceAlertEnabled },
-                        set: { viewModel.setLowBalanceAlertEnabled($0) }
-                    )) {
-                        Text(L10n.tr("Low-balance alert"))
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                    .toggleStyle(.checkbox)
-                    .focusable(false)
-                    .accessibilityLabel(L10n.tr("Low-balance alert"))
+                VStack(alignment: .leading, spacing: DSSpacing.xs) {
+                    // Toggle and threshold share one row: the value sits on
+                    // the trailing edge instead of stacking under the label.
+                    HStack(spacing: DSSpacing.s) {
+                        Toggle(isOn: Binding(
+                            get: { viewModel.lowBalanceAlertEnabled },
+                            set: { viewModel.setLowBalanceAlertEnabled($0) }
+                        )) {
+                            Text(L10n.tr("Low-balance alert"))
+                                .font(DSFont.bodyMedium)
+                        }
+                        .toggleStyle(.checkbox)
+                        .focusable(false)
+                        .accessibilityLabel(L10n.tr("Low-balance alert"))
 
-                    if viewModel.lowBalanceAlertEnabled {
-                        HStack(spacing: 8) {
+                        Spacer(minLength: DSSpacing.xs)
+
+                        if viewModel.lowBalanceAlertEnabled {
                             Stepper(value: Binding(
                                 get: { viewModel.lowBalanceThreshold },
                                 set: { viewModel.setLowBalanceThreshold($0) }
                             ), in: 0...100_000, step: 0.5) {
                                 Text("\(viewModel.lowBalanceThreshold.formatted(.number.precision(.fractionLength(0...2)))) \(String.currencySymbol(for: viewModel.balance.currency))")
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .font(DSFont.captionSemibold)
                                     .monospacedDigit()
                             }
                             .focusable(false)
                             .controlSize(.mini)
                             .help(L10n.tr("Alert threshold in the account's currency"))
-                            Text(L10n.tr("Notifies once when the active account's balance falls to the threshold (in its currency)."))
-                                .font(.system(size: 9.5))
-                                .foregroundColor(.secondary)
-                                .lineLimit(2)
-                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+
+                    if viewModel.lowBalanceAlertEnabled {
+                        Text(L10n.tr("Notifies once when the active account's balance falls to the threshold (in its currency)."))
+                            .font(DSFont.caption)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if let settingsMessage = viewModel.settingsMessage {
+                    Text(settingsMessage)
+                        .font(DSFont.caption)
+                        .foregroundColor(.dsRed)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -164,89 +266,6 @@ struct SettingsPanelView: View {
                 modalTextButton(L10n.tr("Done"), action: onDone)
             }
         }
-        .frame(width: 288)
-        .padding(14)
-    }
-}
-
-struct RefreshIntervalPanelView: View {
-    var currentInterval: Int
-    var onCancel: () -> Void
-    var onSave: (Int) -> Void
-
-    @State private var intervalText: String
-
-    private static let allowedRange = 1...1_440
-
-    init(currentInterval: Int, onCancel: @escaping () -> Void, onSave: @escaping (Int) -> Void) {
-        self.currentInterval = currentInterval
-        self.onCancel = onCancel
-        self.onSave = onSave
-        _intervalText = State(initialValue: "\(currentInterval)")
-    }
-
-    private var parsedInterval: Int? {
-        guard let value = Int(intervalText.trimmingCharacters(in: .whitespaces)),
-              Self.allowedRange.contains(value) else {
-            return nil
-        }
-        return value
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            modalHeader(L10n.tr("Refresh"), subtitle: L10n.tr("Choose a preset or enter minutes."))
-
-            HStack(spacing: 6) {
-                intervalButton(1)
-                intervalButton(5)
-                intervalButton(10)
-            }
-
-            HStack(spacing: 8) {
-                TextField("\(currentInterval)", text: $intervalText)
-                    .modalTextField()
-                    .frame(width: 74)
-                Text(L10n.tr("min"))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.secondary)
-                Spacer()
-            }
-
-            if parsedInterval == nil {
-                Text(L10n.trf("Enter a value between %d and %d.", Self.allowedRange.lowerBound, Self.allowedRange.upperBound))
-                    .font(.system(size: 10))
-                    .foregroundColor(.red)
-            }
-
-            HStack {
-                Spacer()
-                modalTextButton(L10n.tr("Cancel"), action: onCancel)
-                modalPrimaryButton(L10n.tr("Save")) {
-                    if let interval = parsedInterval {
-                        onSave(interval)
-                    }
-                }
-                .disabled(parsedInterval == nil)
-            }
-        }
-        .modalPanelBackground(width: 268)
-    }
-
-    private func intervalButton(_ minutes: Int) -> some View {
-        Button {
-            intervalText = "\(minutes)"
-        } label: {
-            Text(L10n.trf("%d min", minutes))
-                .font(.system(size: 10, weight: .semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 6)
-                .background(
-                    RoundedRectangle(cornerRadius: 7)
-                        .fill(intervalText == "\(minutes)" ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08))
-                )
-        }
-        .buttonStyle(.plain)
-        .focusable(false)
+        .cardBackground()
     }
 }

@@ -58,19 +58,19 @@ final class UISnapshotTests: XCTestCase {
     func testRenderOnboardingAndFullStates() async {
         // 1. Onboarding: no accounts, no key source.
         let onboarding = AppViewModel()
-        render(PopoverBody(viewModel: onboarding, pendingDeleteAccountID: .constant(nil)), name: "onboarding")
+        render(PopoverBody(viewModel: onboarding, pendingDeleteAccountID: .constant(nil), showsSettings: .constant(false)), name: "onboarding")
 
         // 2. Full state: accounts + balances + usage + settings.
         let full = AppViewModel()
         seed(full)
-        render(PopoverBody(viewModel: full, pendingDeleteAccountID: .constant(nil)), name: "full")
+        render(PopoverBody(viewModel: full, pendingDeleteAccountID: .constant(nil), showsSettings: .constant(false)), name: "full")
 
         // 3. Orange warning: active account balance insufficient (isAvailable=false).
         let warn = AppViewModel()
         seed(warn)
         warn.balance.isAvailable = false
         print("WARN state: hasBalance=\(warn.balance.hasBalance) isAvailable=\(warn.balance.isAvailable)")
-        render(PopoverBody(viewModel: warn, pendingDeleteAccountID: .constant(nil)), name: "warnlow")
+        render(PopoverBody(viewModel: warn, pendingDeleteAccountID: .constant(nil), showsSettings: .constant(false)), name: "warnlow")
 
         // 4. Update banner.
         let upd = AppViewModel()
@@ -81,13 +81,54 @@ final class UISnapshotTests: XCTestCase {
             releaseURL: URL(string: "https://github.com/mengxu98/deepseekbar/releases")!
         ))
         print("UPDATE state: \(upd.updateState)")
-        render(PopoverBody(viewModel: upd, pendingDeleteAccountID: .constant(nil)), name: "update")
+        render(PopoverBody(viewModel: upd, pendingDeleteAccountID: .constant(nil), showsSettings: .constant(false)), name: "update")
 
         // 5. Invalid-key banner.
         let invalid = AppViewModel()
         seed(invalid)
         invalid.balance.isKeyInvalid = true
         invalid.balance.errorMessage = "API key is invalid."
-        render(PopoverBody(viewModel: invalid, pendingDeleteAccountID: .constant(nil)), name: "keyinvalid")
+        render(PopoverBody(viewModel: invalid, pendingDeleteAccountID: .constant(nil), showsSettings: .constant(false)), name: "keyinvalid")
+
+        // 6. Inline settings page (footer gear swaps the body) and the
+        // delete-confirmation row.
+        let settings = AppViewModel()
+        seed(settings)
+        settings.showPricingCountdownInMenuBar = true
+        render(SettingsCard(viewModel: settings, onDone: {}), name: "settings")
+
+        let deleting = AppViewModel()
+        seed(deleting)
+        render(
+            PopoverBody(
+                viewModel: deleting,
+                pendingDeleteAccountID: .constant(deleting.accounts.first?.id),
+                showsSettings: .constant(false)
+            ),
+            name: "delete_inline"
+        )
+
+        // 7. Inline editors: rename replaces the account row, add-key opens
+        // inside the account card (no floating panel any more).
+        render(
+            InlineRenameField(
+                initialName: "he",
+                maskedKey: "sk-30a…7258",
+                onSave: { _ in nil },
+                onCancel: {}
+            )
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: DSRadius.row).fill(Color.dsRowFill))
+            .padding(8),
+            name: "rename_inline"
+        )
+
+        render(
+            InlineKeyEditor(onSave: { _ in nil }, onCancel: {})
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: DSRadius.row).fill(Color.dsRowFill))
+                .padding(8),
+            name: "addkey_inline"
+        )
     }
 }

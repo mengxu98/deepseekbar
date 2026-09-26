@@ -17,10 +17,27 @@ final class AppViewModel: ObservableObject {
     @Published var lowBalanceAlertEnabled: Bool = true
     @Published var lowBalanceThreshold: Double = 10
     @Published var launchAtLoginEnabled: Bool = false
+    /// DeepSeek peak / off-peak pricing state, refreshed by `pricingTimer`.
+    @Published private(set) var pricing = DeepSeekPricing.snapshot(
+        at: Date(), schedule: HolidaySchedule.bundled2026
+    )
+    /// Menu-bar badge ("×1" / "½"). On by default: it is the whole point of
+    /// the pricing feature to be visible without opening the popover.
+    @Published var showPricingInMenuBar: Bool = true
+    /// Optional live countdown next to the badge; off by default so the
+    /// menu bar stays compact.
+    @Published var showPricingCountdownInMenuBar: Bool = false
     /// Transient feedback for settings actions (e.g. launch-at-login errors).
     @Published var settingsMessage: String?
+    /// Set in `seedDemo()`: the frozen instant the pricing card should show
+    /// so README figures do not drift with the wall clock.
+    @Published private(set) var demoInstant: Date?
 
-    var statusUpdater: ((BalanceState) -> Void)?
+    /// The bundled statutory-holiday table the pricing math uses.
+    let holidaySchedule = HolidaySchedule.bundled2026
+
+    /// Called whenever anything the menu-bar item renders has changed.
+    var onStatusItemChange: (() -> Void)?
 
     private let keyStore = APIKeyStore()
     private let api = DeepSeekAPI()
@@ -31,13 +48,24 @@ final class AppViewModel: ObservableObject {
     private var apiKey: String?
     private var timer: Timer?
     private var updateTimer: Timer?
-    private var utilityPanel: NSPanel?
+    private var pricingTimer: Timer?
+    private var pricingObservers: [NSObjectProtocol] = []
     private var settingsMessageTask: Task<Void, Never>?
 
     private enum DefaultsKeys {
         static let refreshIntervalMinutes = "DeepSeekBar.refreshIntervalMinutes"
         static let lowBalanceAlertEnabled = "DeepSeekBar.lowBalanceAlertEnabled"
         static let lowBalanceThreshold = "DeepSeekBar.lowBalanceThreshold"
+        static let showPricingInMenuBar = "DeepSeekBar.showPricingInMenuBar"
+        static let showPricingCountdownInMenuBar = "DeepSeekBar.showPricingCountdownInMenuBar"
+    }
+
+    deinit {
+        pricingTimer?.invalidate()
+        pricingObservers.forEach { observer in
+            NotificationCenter.default.removeObserver(observer)
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -54,6 +82,13 @@ final class AppViewModel: ObservableObject {
             lowBalanceThreshold = min(max(defaults.double(forKey: DefaultsKeys.lowBalanceThreshold), 0), 1_000_000)
         }
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+        if defaults.object(forKey: DefaultsKeys.showPricingInMenuBar) != nil {
+            showPricingInMenuBar = defaults.bool(forKey: DefaultsKeys.showPricingInMenuBar)
+        }
+        if defaults.object(forKey: DefaultsKeys.showPricingCountdownInMenuBar) != nil {
+            showPricingCountdownInMenuBar = defaults.bool(forKey: DefaultsKeys.showPricingCountdownInMenuBar)
+        }
+        pricing = DeepSeekPricing.snapshot(at: Date(), schedule: holidaySchedule)
     }
 
     func start() {
@@ -63,6 +98,7 @@ final class AppViewModel: ObservableObject {
         reloadAccounts()
         scheduleTimer()
         scheduleUpdateTimer()
+        startPricingClock()
         refresh()
         Task { await checkForUpdates(automatic: true) }
     }
@@ -94,7 +130,11 @@ final class AppViewModel: ObservableObject {
             totalUsed: 188.90, dailyAverage: 3.62, daysRemaining: 35,
             balance: 128.42, snapshots: [130, 129.5, 129.1, 128.8, 128.6, 128.42]
         )
-        statusUpdater?(mainBalance)
+        // Freeze the pricing state to the same synthetic instant so README
+        // screenshots stay reproducible.
+        demoInstant = now
+        pricing = DeepSeekPricing.snapshot(at: now, schedule: holidaySchedule)
+        onStatusItemChange?()
     }
 
     var activeAccount: APIKeyAccount? {
@@ -125,7 +165,7 @@ final class AppViewModel: ObservableObject {
         guard let apiKey, !apiKey.isEmpty else {
             balance = BalanceState(errorMessage: L10n.tr("Add a DeepSeek API key first."))
             usage = UsageStats()
-            statusUpdater?(balance)
+            onStatusItemChange?()
             return
         }
 
@@ -145,7 +185,7 @@ final class AppViewModel: ObservableObject {
                 failed.isKeyInvalid = (error as? APIError) == .invalidKey
                 failed.updatedAt = Date()
                 balance = failed
-                statusUpdater?(failed)
+                onStatusItemChange?()
             }
         }
     }
@@ -205,7 +245,7 @@ final class AppViewModel: ObservableObject {
     private func applyBalance(_ next: BalanceState) {
         balance = next
         usage = usageTracker.stats(currentBalance: next.totalBalance, namespace: usageNamespace)
-        statusUpdater?(next)
+        onStatusItemChange?()
 
         let actions = alerts.evaluate(
             hasBalance: next.hasBalance,
@@ -224,6 +264,88 @@ final class AppViewModel: ObservableObject {
                 threshold: lowBalanceThreshold
             )
         }
+    }
+
+    // MARK: - Peak / off-peak pricing
+
+    /// Starts the minute-level pricing clock. It wakes at most once a
+    /// minute, but exactly on a price switch, and once a second only while
+    /// the optional menu-bar countdown is on. Internal so the pricing
+    /// settings tests can exercise the real timer.
+    func startPricingClock() {
+        refreshPricing()
+        schedulePricingTick()
+        installPricingObservers()
+    }
+
+    /// Recomputes the pricing state. Cheap; safe to call at any time.
+    func refreshPricing(now: Date = Date()) {
+        let next = DeepSeekPricing.snapshot(at: now, schedule: holidaySchedule)
+        guard next != pricing else { return }
+        pricing = next
+        onStatusItemChange?()
+    }
+
+    private func pricingTick() {
+        refreshPricing()
+        schedulePricingTick()
+    }
+
+    private func schedulePricingTick() {
+        pricingTimer?.invalidate()
+        let showsCountdown = showPricingInMenuBar && showPricingCountdownInMenuBar
+        // Badge-only mode does not need per-second updates, but it must not
+        // be late on a switch either: wake on the boundary, or after a
+        // minute, whichever comes first.
+        let interval: TimeInterval = showsCountdown
+            ? 1
+            : min(60, max(1, pricing.nextSwitch.timeIntervalSinceNow + 0.2))
+        let timer = Timer(timeInterval: interval, repeats: showsCountdown) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.pricingTick()
+            }
+        }
+        // .common so the clock keeps running while menus are tracked.
+        RunLoop.main.add(timer, forMode: .common)
+        pricingTimer = timer
+    }
+
+    /// Sleep/wake and manual clock changes invalidate a Date-based timer.
+    private func installPricingObservers() {
+        guard pricingObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+        let names: [Notification.Name] = [.NSSystemClockDidChange, .NSCalendarDayChanged]
+        pricingObservers = names.map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.pricingTick()
+                }
+            }
+        }
+        pricingObservers.append(
+            NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.pricingTick()
+                }
+            }
+        )
+    }
+
+    func setShowPricingInMenuBar(_ enabled: Bool) {
+        showPricingInMenuBar = enabled
+        defaults.set(enabled, forKey: DefaultsKeys.showPricingInMenuBar)
+        refreshPricing()
+        schedulePricingTick()
+        onStatusItemChange?()
+    }
+
+    func setShowPricingCountdownInMenuBar(_ enabled: Bool) {
+        showPricingCountdownInMenuBar = enabled
+        defaults.set(enabled, forKey: DefaultsKeys.showPricingCountdownInMenuBar)
+        schedulePricingTick()
+        onStatusItemChange?()
     }
 
     // MARK: - Settings
@@ -301,7 +423,7 @@ final class AppViewModel: ObservableObject {
             if let cached = accountBalances[account.id] {
                 balance = cached
                 usage = usageTracker.stats(currentBalance: cached.totalBalance, namespace: usageNamespace)
-                statusUpdater?(cached)
+                onStatusItemChange?()
             }
             refresh()
         } catch {
@@ -370,103 +492,6 @@ final class AppViewModel: ObservableObject {
             return
         }
         NSWorkspace.shared.open(update.releaseURL)
-    }
-
-    // MARK: - Utility panels
-
-    func promptForRefreshInterval() {
-        showUtilityPanel(size: NSSize(width: 300, height: 178)) {
-            RefreshIntervalPanelView(
-                currentInterval: self.refreshIntervalMinutes,
-                onCancel: { [weak self] in
-                    self?.closeUtilityPanel()
-                },
-                onSave: { [weak self] minutes in
-                    self?.setRefreshInterval(minutes)
-                    self?.closeUtilityPanel()
-                }
-            )
-        }
-    }
-
-    func promptForAPIKey() {
-        showUtilityPanel(size: NSSize(width: 376, height: 258)) {
-            AddAPIKeyPanelView(
-                onSave: { [weak self] draft in
-                    guard let self else { return nil }
-                    do {
-                        try self.saveAPIKey(draft.key, name: draft.name)
-                        self.closeUtilityPanel()
-                        return nil
-                    } catch {
-                        return error.localizedDescription
-                    }
-                },
-                onCancel: { [weak self] in
-                    self?.closeUtilityPanel()
-                }
-            )
-        }
-    }
-
-    func promptForRename(_ account: APIKeyAccount) {
-        showUtilityPanel(size: NSSize(width: 332, height: 168)) {
-            RenameAccountPanelView(
-                account: account,
-                onSave: { [weak self] newName in
-                    guard let self else { return nil }
-                    do {
-                        try self.renameAccount(account, to: newName)
-                        self.closeUtilityPanel()
-                        return nil
-                    } catch {
-                        return error.localizedDescription
-                    }
-                },
-                onCancel: { [weak self] in
-                    self?.closeUtilityPanel()
-                }
-            )
-        }
-    }
-
-    private func makeUtilityPanel(size: NSSize) -> NSPanel {
-        let panel = NSPanel(
-            contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
-        panel.isMovableByWindowBackground = true
-        panel.isFloatingPanel = true
-        panel.level = .floating
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.standardWindowButton(.closeButton)?.isHidden = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
-        return panel
-    }
-
-    private func showUtilityPanel<PanelContent: View>(
-        size: NSSize,
-        @ViewBuilder content: @escaping () -> PanelContent
-    ) {
-        utilityPanel?.close()
-        let panel = makeUtilityPanel(size: size)
-        panel.contentView = NSHostingView(rootView: content())
-        utilityPanel = panel
-        NSApp.activate(ignoringOtherApps: true)
-        panel.center()
-        panel.makeKeyAndOrderFront(nil)
-    }
-
-    private func closeUtilityPanel() {
-        utilityPanel?.close()
-        utilityPanel = nil
     }
 
     // MARK: - Private
