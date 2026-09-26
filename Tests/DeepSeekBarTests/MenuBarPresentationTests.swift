@@ -82,7 +82,13 @@ final class MenuBarPresentationTests: XCTestCase {
             showsPricingCountdown: true
         )
         XCTAssertEqual(presentation.segments.map(\.text), ["¥128"])
-        XCTAssertEqual(presentation.tooltip, "DeepSeekBar · ¥128.42")
+        // Currency formatting follows the machine locale — the menu-bar text
+        // uses the fixed "¥" symbol, but the tooltip goes through
+        // NumberFormatter, which spells it "CN¥" on an en-US runner. Assert
+        // the shape, not one spelling.
+        XCTAssertTrue(presentation.tooltip.hasPrefix("DeepSeekBar · "))
+        XCTAssertTrue(presentation.tooltip.contains("128.42"))
+        XCTAssertFalse(presentation.tooltip.contains("½"))
     }
 
     func testInsufficientBalanceKeepsItsMarkerAndTheBadge() {
