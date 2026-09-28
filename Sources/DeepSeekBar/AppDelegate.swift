@@ -149,6 +149,9 @@ final class DeepSeekBarApp: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
+        // Opening by mouse should not preselect the console button. Tab
+        // still enters the normal keyboard focus order.
+        popover.contentViewController?.view.window?.makeFirstResponder(nil)
     }
 
     /// Re-sizes the open popover after the body's natural height changed

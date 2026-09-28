@@ -15,7 +15,8 @@ A lightweight macOS menu bar app for following DeepSeek usage at a glance — AP
 - **Menu bar balance** — live total balance (with currency symbol) next to the menu bar; turns orange with a `!` marker when the balance can no longer cover API calls (`is_available = false`).
 - **Peak / off-peak pricing** — DeepSeek charges half price outside weekday peak windows, and the menu bar says which side of the line you are on at a glance: `½` during off-peak, `×1` during peak, with an optional live countdown to the next switch. The popover card shows the current rate, how far through the block you are, and the next switch in Beijing time.
 - **Multi-key management** — add any number of DeepSeek API keys, rename them, switch the active key with one click, and see each key's balance at a glance. Duplicate keys are rejected.
-- **Usage statistics** — today / total spend plus the granted vs topped-up split, estimated from local balance snapshots (top-ups reset the baseline; DeepSeek's API exposes no usage endpoint).
+- **Balance overview** — a solid DeepSeek-blue card shows the active account's balance and its granted vs topped-up split; pricing details expand in place.
+- **Usage estimates** — separate today / total figures, estimated from local balance snapshots (top-ups reset the baseline; DeepSeek's API exposes no usage endpoint).
 - **Low-balance alerts** — configurable threshold with a local notification (fires once per alerting period, re-arms on recovery), plus an automatic alert when the official `is_available` flag goes false.
 - **Launch at login** — standard macOS login item (SMAppService).
 - **Auto updates** — daily check against GitHub releases; the popover shows a banner when a new version is available.
@@ -90,7 +91,7 @@ CODESIGN_IDENTITY="Developer ID Application: …" NOTARYTOOL_PROFILE="my-profile
 
 **Why are usage numbers estimates?** DeepSeek's API only exposes the current balance. DeepSeekBar snapshots the balance on every refresh and counts drops between snapshots; a top-up (or any significant balance rise) resets the baseline. Recent snapshots are kept raw, older ones are coalesced to hourly buckets.
 
-**How do I delete my data?** Remove keys from the popover (🗑 per key — this also deletes the Keychain item), use "Reset usage" for snapshots, and delete `~/Library/Application Support/DeepSeekBar/` to remove everything else.
+**How do I delete my data?** Choose Delete from a key's more-actions menu in the popover (this also deletes the Keychain item), use "Reset usage" for snapshots, and delete `~/Library/Application Support/DeepSeekBar/` to remove everything else.
 
 **The menu bar shows an error.** Hover the item for the message. `API key is invalid` means the key was rejected (401) — click Replace in the popover to update it.
 

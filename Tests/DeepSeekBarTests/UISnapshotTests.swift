@@ -11,20 +11,32 @@ final class UISnapshotTests: XCTestCase {
         // No fixed height: a fixed frame centers-and-clips content that
         // overflows it, which would cut off the banner at the top. The
         // real popover's body scrolls, so nothing is clipped there.
-        let renderer = ImageRenderer(content: view
-            .frame(width: 300)
-            .background(panelBackgroundColor))
-        renderer.scale = 2
-        guard let image = renderer.nsImage,
-              let tiff = image.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let data = rep.representation(using: .png, properties: [:]) else {
-            XCTFail("failed to render \(name)")
-            return
+        for (suffix, appearanceName, scheme) in [
+            ("light", NSAppearance.Name.aqua, ColorScheme.light),
+            ("dark", NSAppearance.Name.darkAqua, ColorScheme.dark),
+        ] {
+            NSAppearance(named: appearanceName)?.performAsCurrentDrawingAppearance {
+                let renderer = ImageRenderer(content: view
+                    .frame(width: PopoverSizing.width)
+                    .background(panelBackgroundColor)
+                    .environment(\.colorScheme, scheme))
+                renderer.scale = 2
+                guard let image = renderer.nsImage,
+                      let tiff = image.tiffRepresentation,
+                      let rep = NSBitmapImageRep(data: tiff),
+                      let data = rep.representation(using: .png, properties: [:]) else {
+                    XCTFail("failed to render \(name)_\(suffix)")
+                    return
+                }
+                let path = "/tmp/dsb_ui_\(name)_\(suffix).png"
+                do {
+                    try data.write(to: URL(fileURLWithPath: path))
+                    print("WROTE \(path)")
+                } catch {
+                    XCTFail("failed to write \(path): \(error)")
+                }
+            }
         }
-        let path = "/tmp/dsb_ui_\(name).png"
-        try? data.write(to: URL(fileURLWithPath: path))
-        print("WROTE \(path)")
     }
 
     @MainActor
@@ -64,6 +76,24 @@ final class UISnapshotTests: XCTestCase {
         let full = AppViewModel()
         seed(full)
         render(PopoverBody(viewModel: full, pendingDeleteAccountID: .constant(nil), showsSettings: .constant(false)), name: "full")
+
+        // Long labels, large balances, and multiple accounts must still fit.
+        let crowded = AppViewModel()
+        seed(crowded)
+        crowded.accounts[0].name = "Research production account / 研究生产环境"
+        crowded.keySource = .account(crowded.accounts[0].name)
+        crowded.balance.totalBalance = 1234567.89
+        crowded.accountBalances[crowded.accounts[0].id] = crowded.balance
+        for index in 3...6 {
+            crowded.accounts.append(APIKeyAccount(id: UUID(), name: "Workspace \(index)", key: "sk-demo-\(index)", createdAt: Date()))
+        }
+        render(PopoverBody(viewModel: crowded, pendingDeleteAccountID: .constant(nil), showsSettings: .constant(false)), name: "crowded")
+
+        let pending = AppViewModel()
+        seed(pending)
+        pending.balance = BalanceState()
+        pending.accountBalances = [:]
+        render(PopoverBody(viewModel: pending, pendingDeleteAccountID: .constant(nil), showsSettings: .constant(false)), name: "pending")
 
         // 3. Orange warning: active account balance insufficient (isAvailable=false).
         let warn = AppViewModel()

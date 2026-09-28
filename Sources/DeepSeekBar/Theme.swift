@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 enum PopoverSizing {
-    static let width: CGFloat = 300
+    static let width: CGFloat = 320
     /// Fallback/placeholder height until the hosting view reports its
     /// fitting size on show.
     static let preferredHeight: CGFloat = 560
@@ -23,7 +23,7 @@ enum PopoverSizing {
 /// long tail of one-off sizes.
 enum DSFont {
     /// The one big number (active balance).
-    static let hero = Font.system(size: 17, weight: .semibold)
+    static let hero = Font.system(size: 28, weight: .semibold)
     /// Window/popover titles.
     static let title = Font.system(size: 13, weight: .semibold)
     /// Card headers.
@@ -71,6 +71,13 @@ private func dsDynamic(light: NSColor, dark: NSColor) -> Color {
 // MARK: - Palette
 
 extension Color {
+    /// Solid DeepSeek theme blue for the balance overview in both appearances.
+    static let dsHeroBlue = Color(red: 77 / 255, green: 107 / 255, blue: 254 / 255)
+    /// Distinct estimate accents, independent of pricing and error states.
+    static let dsTeal = dsDynamic(light: dsRGB(0.03, 0.43, 0.45), dark: dsRGB(0.33, 0.82, 0.80))
+    static let dsTealTint = dsDynamic(light: dsRGB(0.03, 0.53, 0.55, 0.08), dark: dsRGB(0.33, 0.82, 0.80, 0.10))
+    static let dsIndigoTint = dsDynamic(light: dsRGB(0.42, 0.30, 0.78, 0.08), dark: dsRGB(0.60, 0.58, 0.98, 0.12))
+
     /// Brand: active account, off-peak pricing, today's spend.
     static let dsBlue = dsDynamic(light: dsRGB(0.10, 0.45, 0.88), dark: dsRGB(0.38, 0.66, 1.00))
     /// Cumulative totals — same family as the brand hue, clearly secondary.
@@ -204,5 +211,22 @@ extension View {
                 RoundedRectangle(cornerRadius: DSRadius.card)
                     .fill(fill)
             )
+    }
+}
+
+/// Compact desktop hit area with a stable hover treatment.
+struct DSIconButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(DSFont.bodyMedium)
+            .frame(width: 28, height: 28)
+            .background(RoundedRectangle(cornerRadius: DSRadius.row)
+                .fill(isHovered || configuration.isPressed ? Color.dsControlFill : .clear))
+            .contentShape(Rectangle())
+            .opacity(isEnabled ? 1 : 0.45)
+            .onHover { isHovered = $0 }
     }
 }

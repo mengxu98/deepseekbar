@@ -109,3 +109,15 @@
 "Weekday · peak 09:00–12:00, 14:00–18:00" = "工作日 · 高峰 09:00–12:00、14:00–18:00";
 "Weekend · off-peak all day" = "周末 · 全天空闲";
 "min" = "分钟";
+
+/* Balance overview */
+"Back" = "返回";
+"Current balance" = "当前余额";
+"Last known balance" = "上次获取的余额";
+"Today’s estimate" = "今日估算";
+"Total estimate" = "累计估算";
+"Account actions" = "账户操作";
+"Actions for %@" = "%@ 的操作";
+"Pricing details" = "计费时段详情";
+"Expanded" = "已展开";
+"Collapsed" = "已收起";

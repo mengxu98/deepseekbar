@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="DeepSeekBar"
-APP_VERSION="0.0.6"
+APP_VERSION="0.0.7"
 BUILD_DIR=".build/release"
 APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
 DMG_STAGE="${BUILD_DIR}/dmg"

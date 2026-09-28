@@ -161,11 +161,15 @@ struct InlineRenameField: View {
     }
 }
 
-/// Settings shown as a card inside the popover body (the footer gear swaps
+/// Settings shown as a card inside the popover body (the header gear swaps
 /// the body for this page — no anchored popover).
 struct SettingsCard: View {
     @ObservedObject var viewModel: AppViewModel
     var onDone: () -> Void
+
+    @State private var isEditingInterval = false
+    @State private var intervalDraft = ""
+    @FocusState private var intervalFieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: DSSpacing.m) {
@@ -261,11 +265,187 @@ struct SettingsCard: View {
                 }
             }
 
+            Divider()
             HStack {
+                Text(L10n.tr("Refresh interval"))
+                    .font(DSFont.bodyMedium)
                 Spacer()
-                modalTextButton(L10n.tr("Done"), action: onDone)
+                if isEditingInterval {
+                    intervalEditor
+                } else {
+                    Menu {
+                        Button(L10n.trf("%d min", 1)) {
+                            viewModel.setRefreshInterval(1)
+                        }
+                        Button(L10n.trf("%d min", 5)) {
+                            viewModel.setRefreshInterval(5)
+                        }
+                        Button(L10n.trf("%d min", 10)) {
+                            viewModel.setRefreshInterval(10)
+                        }
+                        Divider()
+                        Button(L10n.tr("Custom...")) {
+                            startEditingInterval()
+                        }
+                    } label: {
+                        Text(L10n.trf("%d min", viewModel.refreshIntervalMinutes))
+                            .font(DSFont.captionMedium)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .focusable(false)
+                    .fixedSize()
+                    .accessibilityLabel(L10n.tr("Refresh interval"))
+
+                }
+            }
+            Button(action: handleUpdateAction) {
+                Label(updateHelpText, systemImage: updateIconName)
+                    .font(DSFont.bodyMedium)
+                    .foregroundColor(updateButtonColor)
+            }
+            .buttonStyle(.plain)
+            .disabled(updateButtonDisabled)
+
+            HStack {
+                Button(L10n.tr("Quit DeepSeekBar")) { NSApp.terminate(nil) }
+                    .font(DSFont.caption)
+                    .foregroundColor(.secondary)
+                    .buttonStyle(.plain)
+                Spacer()
+                modalTextButton(L10n.tr("Back"), action: onDone)
             }
         }
         .cardBackground()
     }
+    /// Keep custom refresh intervals editable inside settings.
+    private var intervalEditor: some View {
+        HStack(spacing: DSSpacing.xs) {
+            Image(systemName: "timer")
+                .font(DSFont.caption)
+                .foregroundColor(.secondary)
+
+            TextField("5", text: $intervalDraft)
+                .textFieldStyle(.plain)
+                .font(DSFont.captionMedium)
+                .monospacedDigit()
+                .multilineTextAlignment(.trailing)
+                .frame(width: 34)
+                .padding(.horizontal, DSSpacing.xs)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: DSRadius.row)
+                        .fill(Color.dsControlFill)
+                )
+                .focused($intervalFieldFocused)
+                .onSubmit(commitInterval)
+                .onExitCommand(perform: cancelIntervalEdit)
+                .accessibilityLabel(L10n.tr("Refresh interval"))
+
+            Text(L10n.tr("min"))
+                .font(DSFont.caption)
+                .foregroundColor(.secondary)
+
+            Button(action: commitInterval) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(DSFont.body)
+                    .foregroundColor(parsedInterval == nil ? .secondary : .dsBlue)
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .disabled(parsedInterval == nil)
+            .help(L10n.tr("Save"))
+            .accessibilityLabel(L10n.tr("Save"))
+
+            Button(action: cancelIntervalEdit) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(DSFont.body)
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .help(L10n.tr("Cancel"))
+            .accessibilityLabel(L10n.tr("Cancel"))
+        }
+    }
+
+    private var parsedInterval: Int? {
+        guard let value = Int(intervalDraft.trimmingCharacters(in: .whitespaces)),
+              (1...1_440).contains(value) else {
+            return nil
+        }
+        return value
+    }
+
+    private func startEditingInterval() {
+        intervalDraft = "\(viewModel.refreshIntervalMinutes)"
+        isEditingInterval = true
+        DispatchQueue.main.async { intervalFieldFocused = true }
+    }
+
+    private func commitInterval() {
+        guard let minutes = parsedInterval else { return }
+        viewModel.setRefreshInterval(minutes)
+        isEditingInterval = false
+    }
+
+    private func cancelIntervalEdit() {
+        isEditingInterval = false
+    }
+
+    private func handleUpdateAction() {
+        switch viewModel.updateState {
+        case .available:
+            viewModel.openUpdateDownload()
+        default:
+            Task { await viewModel.checkForUpdates(automatic: false) }
+        }
+    }
+
+    private var updateIconName: String {
+        switch viewModel.updateState {
+        case .checking:
+            return "hourglass"
+        case .available:
+            return "arrow.down.circle.fill"
+        case .failed:
+            return "exclamationmark.circle"
+        default:
+            return "arrow.down.circle"
+        }
+    }
+
+    private var updateButtonDisabled: Bool {
+        if case .checking = viewModel.updateState {
+            return true
+        }
+        return false
+    }
+
+    private var updateButtonColor: Color {
+        switch viewModel.updateState {
+        case .available:
+            return .dsBlue
+        case .failed:
+            return .dsAmber
+        default:
+            return .secondary
+        }
+    }
+
+    private var updateHelpText: String {
+        switch viewModel.updateState {
+        case .checking:
+            return L10n.tr("Checking for updates")
+        case let .available(update):
+            return L10n.trf("Download DeepSeekBar %@", update.latestVersion)
+        case let .upToDate(version):
+            return L10n.trf("DeepSeekBar is up to date (%@)", version)
+        case .failed:
+            return L10n.tr("Update check failed; click to retry")
+        case .idle:
+            return L10n.tr("Check for updates")
+        }
+    }
+
+
 }

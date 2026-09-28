@@ -3,13 +3,15 @@ import SwiftUI
 /// DeepSeek peak / off-peak card.
 ///
 /// Pricing needs no API key, so this card is shown even before an account
-/// is configured. It is also the app's one colour-coded surface: cool blue
-/// while tokens are half price, warm amber during peak hours.
+/// is configured. Blue and amber accents distinguish pricing periods
+/// while the balance overview remains the dominant surface.
 struct PricingCard: View {
     var schedule: HolidaySchedule
     /// Screenshot support (`--demo`): render this instant instead of the
     /// live clock so README figures are reproducible.
     var frozenAt: Date?
+    var onContentSizeChange: () -> Void = {}
+    @State private var showsDetails = false
 
     var body: some View {
         if let frozenAt {
@@ -46,10 +48,30 @@ struct PricingCard: View {
 
             PricingProgressBar(progress: snapshot.progress, tint: accent)
 
-            Text(detailText(snapshot))
-                .font(DSFont.caption)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .center, spacing: DSSpacing.xs) {
+                Text(L10n.trf("Next switch %@ Beijing time", PricingFormatter.switchLabel(snapshot.nextSwitch, relativeTo: snapshot.date)))
+                    .font(DSFont.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Button {
+                    showsDetails.toggle()
+                    onContentSizeChange()
+                } label: {
+                    Image(systemName: showsDetails ? "info.circle.fill" : "info.circle")
+                        .foregroundColor(showsDetails ? accent : .secondary)
+                }
+                .buttonStyle(DSIconButtonStyle())
+                .help(L10n.tr("Pricing details"))
+                .accessibilityLabel(L10n.tr("Pricing details"))
+                .accessibilityValue(L10n.tr(showsDetails ? "Expanded" : "Collapsed"))
+            }
+            if showsDetails {
+                Text(detailText(snapshot))
+                    .font(DSFont.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             if let coverageNote {
                 Text(coverageNote)

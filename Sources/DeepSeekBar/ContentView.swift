@@ -8,11 +8,6 @@ struct ContentView: View {
     @State private var pendingDeleteAccountID: UUID?
     /// The gear swaps the body for an inline settings page.
     @State private var showsSettings = false
-    /// Custom refresh interval, edited in place in the footer.
-    @State private var isEditingInterval = false
-    @State private var intervalDraft = ""
-    @FocusState private var intervalFieldFocused: Bool
-
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -36,279 +31,50 @@ struct ContentView: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: DSSpacing.s) {
             Text("deepseekbar")
                 .font(DSFont.title)
-
-            Text(viewModel.keySource.label)
-                .font(DSFont.captionMedium)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .padding(.horizontal, 6)
-                .padding(.vertical, DSSpacing.xxs)
-                .background(
-                    RoundedRectangle(cornerRadius: DSRadius.row)
-                        .fill(statusColor.opacity(0.14))
-                )
-                .foregroundColor(statusColor)
-
             Spacer()
-
-            Button {
-                viewModel.openConsole()
-            } label: {
+            Button { viewModel.openConsole() } label: {
                 Image(systemName: "arrow.up.right.square")
-                    .font(.system(size: 12))
             }
-            .buttonStyle(.plain)
-            .focusable(false)
+            .buttonStyle(DSIconButtonStyle())
             .help(L10n.tr("Open DeepSeek Console"))
             .accessibilityLabel(L10n.tr("Open DeepSeek Console"))
-        }
-        .padding(.horizontal, DSSpacing.m)
-        .padding(.vertical, DSSpacing.s)
-    }
-
-    // MARK: - Footer
-
-    private var footer: some View {
-        HStack(spacing: DSSpacing.s) {
-            if isEditingInterval {
-                intervalEditor
-            } else {
-                footerStatus
-            }
-
-            Spacer(minLength: DSSpacing.xs)
 
             Button {
                 showsSettings.toggle()
                 onContentSizeChange()
             } label: {
-                Image(systemName: "gearshape")
-                    .font(DSFont.bodyMedium)
-                    .foregroundColor(showsSettings ? .dsBlue : .primary)
+                Image(systemName: showsSettings ? "chevron.left" : "gearshape")
             }
-            .buttonStyle(.plain)
-            .focusable(false)
-            .help(L10n.tr("Settings"))
-            .accessibilityLabel(L10n.tr("Settings"))
-
-            Button {
-                NSApp.terminate(nil)
-            } label: {
-                Image(systemName: "power")
-                    .font(.system(size: 12))
-            }
-            .buttonStyle(.plain)
-            .focusable(false)
-            .help(L10n.tr("Quit DeepSeekBar"))
-            .accessibilityLabel(L10n.tr("Quit DeepSeekBar"))
+            .buttonStyle(DSIconButtonStyle())
+            .help(L10n.tr(showsSettings ? "Back" : "Settings"))
+            .accessibilityLabel(L10n.tr(showsSettings ? "Back" : "Settings"))
         }
         .padding(.horizontal, DSSpacing.m)
-        .padding(.vertical, DSSpacing.s)
+        .padding(.vertical, DSSpacing.xs)
     }
 
-    private var footerStatus: some View {
-        HStack(spacing: 6) {
+    private var footer: some View {
+        HStack(spacing: DSSpacing.s) {
+            Image(systemName: viewModel.balance.errorMessage == nil ? "clock" : "exclamationmark.circle")
+                .foregroundColor(viewModel.balance.errorMessage == nil ? .secondary : .dsRed)
             Text(updatedText)
-                .font(DSFont.caption)
-                .foregroundColor(.secondary)
                 .monospacedDigit()
-
-            Text("·")
-                .font(DSFont.caption)
-                .foregroundColor(.secondary.opacity(0.7))
-
-            Button {
-                viewModel.refresh()
-            } label: {
+                .foregroundColor(.secondary)
+            Spacer()
+            Button { viewModel.refresh() } label: {
                 Image(systemName: viewModel.isRefreshing ? "hourglass" : "arrow.clockwise")
-                    .font(DSFont.bodyMedium)
             }
-            .buttonStyle(.plain)
-            .focusable(false)
+            .buttonStyle(DSIconButtonStyle())
             .disabled(viewModel.isRefreshing)
             .help(L10n.tr("Refresh now"))
             .accessibilityLabel(L10n.tr("Refresh now"))
-
-            Menu {
-                Button(L10n.trf("%d min", 1)) {
-                    viewModel.setRefreshInterval(1)
-                }
-                Button(L10n.trf("%d min", 5)) {
-                    viewModel.setRefreshInterval(5)
-                }
-                Button(L10n.trf("%d min", 10)) {
-                    viewModel.setRefreshInterval(10)
-                }
-                Divider()
-                Button(L10n.tr("Custom...")) {
-                    startEditingInterval()
-                }
-            } label: {
-                Text(L10n.trf("%d min", viewModel.refreshIntervalMinutes))
-                    .font(DSFont.captionMedium)
-            }
-            .menuStyle(.borderlessButton)
-            .focusable(false)
-            .fixedSize()
-            .accessibilityLabel(L10n.tr("Refresh interval"))
-
-            Button {
-                handleUpdateAction()
-            } label: {
-                Image(systemName: updateIconName)
-                    .font(DSFont.bodyMedium)
-            }
-            .buttonStyle(.plain)
-            .focusable(false)
-            .disabled(updateButtonDisabled)
-            .foregroundColor(updateButtonColor)
-            .help(updateHelpText)
-            .accessibilityLabel(updateHelpText)
         }
-    }
-
-    /// In-place editor for a custom refresh interval — replaces the status
-    /// group in the footer instead of opening a panel.
-    private var intervalEditor: some View {
-        HStack(spacing: DSSpacing.xs) {
-            Image(systemName: "timer")
-                .font(DSFont.caption)
-                .foregroundColor(.secondary)
-
-            TextField("5", text: $intervalDraft)
-                .textFieldStyle(.plain)
-                .font(DSFont.captionMedium)
-                .monospacedDigit()
-                .multilineTextAlignment(.trailing)
-                .frame(width: 34)
-                .padding(.horizontal, DSSpacing.xs)
-                .padding(.vertical, 2)
-                .background(
-                    RoundedRectangle(cornerRadius: DSRadius.row)
-                        .fill(Color.dsControlFill)
-                )
-                .focused($intervalFieldFocused)
-                .onSubmit(commitInterval)
-                .onExitCommand(perform: cancelIntervalEdit)
-                .accessibilityLabel(L10n.tr("Refresh interval"))
-
-            Text(L10n.tr("min"))
-                .font(DSFont.caption)
-                .foregroundColor(.secondary)
-
-            Button(action: commitInterval) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(DSFont.body)
-                    .foregroundColor(parsedInterval == nil ? .secondary : .dsBlue)
-            }
-            .buttonStyle(.plain)
-            .focusable(false)
-            .disabled(parsedInterval == nil)
-            .help(L10n.tr("Save"))
-            .accessibilityLabel(L10n.tr("Save"))
-
-            Button(action: cancelIntervalEdit) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(DSFont.body)
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(.plain)
-            .focusable(false)
-            .help(L10n.tr("Cancel"))
-            .accessibilityLabel(L10n.tr("Cancel"))
-        }
-    }
-
-    private var parsedInterval: Int? {
-        guard let value = Int(intervalDraft.trimmingCharacters(in: .whitespaces)),
-              (1...1_440).contains(value) else {
-            return nil
-        }
-        return value
-    }
-
-    private func startEditingInterval() {
-        intervalDraft = "\(viewModel.refreshIntervalMinutes)"
-        isEditingInterval = true
-        DispatchQueue.main.async { intervalFieldFocused = true }
-    }
-
-    private func commitInterval() {
-        guard let minutes = parsedInterval else { return }
-        viewModel.setRefreshInterval(minutes)
-        isEditingInterval = false
-    }
-
-    private func cancelIntervalEdit() {
-        isEditingInterval = false
-    }
-
-    private func handleUpdateAction() {
-        switch viewModel.updateState {
-        case .available:
-            viewModel.openUpdateDownload()
-        default:
-            Task { await viewModel.checkForUpdates(automatic: false) }
-        }
-    }
-
-    private var updateIconName: String {
-        switch viewModel.updateState {
-        case .checking:
-            return "hourglass"
-        case .available:
-            return "arrow.down.circle.fill"
-        case .failed:
-            return "exclamationmark.circle"
-        default:
-            return "arrow.down.circle"
-        }
-    }
-
-    private var updateButtonDisabled: Bool {
-        if case .checking = viewModel.updateState {
-            return true
-        }
-        return false
-    }
-
-    private var updateButtonColor: Color {
-        switch viewModel.updateState {
-        case .available:
-            return .dsBlue
-        case .failed:
-            return .dsAmber
-        default:
-            return .secondary
-        }
-    }
-
-    private var updateHelpText: String {
-        switch viewModel.updateState {
-        case .checking:
-            return L10n.tr("Checking for updates")
-        case let .available(update):
-            return L10n.trf("Download DeepSeekBar %@", update.latestVersion)
-        case let .upToDate(version):
-            return L10n.trf("DeepSeekBar is up to date (%@)", version)
-        case .failed:
-            return L10n.tr("Update check failed; click to retry")
-        case .idle:
-            return L10n.tr("Check for updates")
-        }
-    }
-
-    private var statusColor: Color {
-        if viewModel.balance.errorMessage != nil {
-            return .dsRed
-        }
-        if viewModel.balance.hasBalance, !viewModel.balance.isAvailable {
-            return .dsAmber
-        }
-        return viewModel.balance.hasBalance ? .dsBlue : .secondary
+        .font(DSFont.caption)
+        .padding(.horizontal, DSSpacing.m)
+        .padding(.vertical, DSSpacing.xs)
     }
 
     private var updatedText: String {
@@ -329,7 +95,7 @@ struct ContentView: View {
 struct PopoverBody: View {
     @ObservedObject var viewModel: AppViewModel
     @Binding var pendingDeleteAccountID: UUID?
-    /// Set by the footer gear: the body becomes the settings page.
+    /// Set by the header gear: the body becomes the settings page.
     @Binding var showsSettings: Bool
     var onContentSizeChange: () -> Void = {}
     /// Account currently being renamed in place (nil = none).
@@ -345,8 +111,7 @@ struct PopoverBody: View {
                 accountContent
             }
         }
-        .padding(.horizontal, DSSpacing.s)
-        .padding(.vertical, DSSpacing.s)
+        .padding(DSSpacing.m)
         // Inline editors change the body's natural height; ask the popover
         // to re-fit whenever they open or close.
         .onChange(of: isAddingKey) { _ in onContentSizeChange() }
@@ -367,9 +132,10 @@ struct PopoverBody: View {
             if let settingsMessage = viewModel.settingsMessage {
                 errorBanner(settingsMessage)
             }
-            // Peak / off-peak pricing needs no API key, so the card leads
-            // the body and is shown in every account state.
-            PricingCard(schedule: viewModel.holidaySchedule, frozenAt: viewModel.demoInstant)
+            if !viewModel.needsOnboarding {
+                balanceOverview
+            }
+            PricingCard(schedule: viewModel.holidaySchedule, frozenAt: viewModel.demoInstant, onContentSizeChange: onContentSizeChange)
             if viewModel.needsOnboarding {
                 if isAddingKey {
                     addKeyCard
@@ -380,8 +146,9 @@ struct PopoverBody: View {
                 if viewModel.balance.hasBalance, !viewModel.balance.isAvailable {
                     warningBanner(L10n.tr("Balance insufficient — API calls may fail. Top up at platform.deepseek.com."))
                 }
-                accountsCard
                 usageCard
+                Divider()
+                accountsCard
                 if viewModel.balance.isKeyInvalid {
                     keyInvalidBanner
                 } else if let error = viewModel.balance.errorMessage {
@@ -465,7 +232,7 @@ struct PopoverBody: View {
                 .rowBackground()
             }
         }
-        .cardBackground()
+        .padding(.horizontal, DSSpacing.xs)
     }
 
     /// Onboarding variant of the inline form: same editor, card chrome.
@@ -547,70 +314,61 @@ struct PopoverBody: View {
 
     private func accountRowContent(_ account: APIKeyAccount) -> some View {
         let isActive = account.id == viewModel.activeAccountID
-        return HStack(alignment: .center, spacing: DSSpacing.s) {
-            Circle()
-                .fill(isActive ? Color.dsBlue : Color.secondary.opacity(0.35))
-                .frame(width: 6, height: 6)
-
-            VStack(alignment: .leading, spacing: DSSpacing.xxs) {
-                HStack(spacing: 6) {
-                    Text(account.displayName)
-                        .font(DSFont.bodyMedium)
-                        .lineLimit(1)
-
-                    Spacer(minLength: 4)
-
+        return HStack(spacing: DSSpacing.xs) {
+            Button { viewModel.activateAccount(account) } label: {
+                HStack(spacing: DSSpacing.s) {
+                    Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
+                        .foregroundColor(isActive ? .dsBlue : .secondary)
+                        .font(DSFont.body)
+                    VStack(alignment: .leading, spacing: DSSpacing.xxs) {
+                        Text(account.displayName)
+                            .font(DSFont.bodyMedium)
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        Text(account.maskedKey)
+                            .font(DSFont.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: DSSpacing.xs)
                     Text(accountBalanceText(account))
                         .font(DSFont.bodySemibold)
                         .foregroundColor(accountBalanceColor(account, isActive: isActive))
                         .monospacedDigit()
                         .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .layoutPriority(1)
                 }
-
-                Text(account.maskedKey)
-                    .font(DSFont.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Button {
-                pendingDeleteAccountID = nil
-                editingAccountID = account.id
-            } label: {
-                Image(systemName: "pencil")
-                    .font(DSFont.caption)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .focusable(false)
-            .foregroundColor(.secondary)
-            .help(L10n.tr("Rename Key"))
-            .accessibilityLabel(L10n.trf("Rename key %@", account.displayName))
+            .accessibilityLabel(L10n.trf("Account %@, balance %@", account.displayName, accountBalanceText(account)))
+            .accessibilityAddTraits(isActive ? .isSelected : [])
 
-            Button {
-                pendingDeleteAccountID = account.id
+            Menu {
+                Button(L10n.tr("Rename Key")) {
+                    pendingDeleteAccountID = nil
+                    editingAccountID = account.id
+                }
+                Button(L10n.tr("Delete"), role: .destructive) {
+                    pendingDeleteAccountID = account.id
+                }
             } label: {
-                Image(systemName: "trash")
-                    .font(DSFont.caption)
+                Image(systemName: "ellipsis")
+                    .frame(width: 24, height: 28)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .focusable(false)
-            .foregroundColor(.secondary)
-            .accessibilityLabel(L10n.trf("Delete key %@", account.displayName))
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(L10n.tr("Account actions"))
+            .accessibilityLabel(L10n.trf("Actions for %@", account.displayName))
         }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            viewModel.activateAccount(account)
-        }
-        .frame(height: 44)
         .padding(.horizontal, DSSpacing.s)
-        .padding(.vertical, DSSpacing.xs)
-        .background(
-            RoundedRectangle(cornerRadius: DSRadius.row)
-                .fill(isActive ? Color.dsBlueTint : Color.dsRowFill)
-        )
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(L10n.trf("Account %@, balance %@", account.displayName, accountBalanceText(account)))
+        .padding(.vertical, DSSpacing.xxs)
+        .background(RoundedRectangle(cornerRadius: DSRadius.control)
+            .fill(isActive ? Color.dsBlueTint : .clear))
     }
 
     /// Amber for a balance that can no longer pay for calls, red for a
@@ -642,100 +400,88 @@ struct PopoverBody: View {
         return "--"
     }
 
+    // MARK: Balance overview
+
+    private var balanceOverview: some View {
+        VStack(alignment: .leading, spacing: DSSpacing.m) {
+            HStack {
+                Text(viewModel.keySource.label)
+                    .font(DSFont.bodySemibold)
+                    .lineLimit(1)
+                Spacer(minLength: DSSpacing.s)
+                Image(systemName: "wallet.bifold")
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: DSSpacing.xxs) {
+                Text(viewModel.balance.totalBalance?.moneyText(currency: viewModel.balance.currency) ?? "—")
+                    .font(DSFont.hero)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                Text(L10n.tr(viewModel.balance.errorMessage == nil ? "Current balance" : "Last known balance"))
+                    .font(DSFont.captionMedium)
+                    .foregroundStyle(.white)
+            }
+            if let toppedUp = viewModel.balance.toppedUpBalance,
+               let granted = viewModel.balance.grantedBalance {
+                HStack(spacing: DSSpacing.l) {
+                    heroDetail("Topped up", value: toppedUp)
+                    heroDetail("Granted", value: granted)
+                }
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(DSSpacing.l)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.dsHeroBlue)
+        .clipShape(RoundedRectangle(cornerRadius: DSRadius.card + 2))
+    }
+
+    private func heroDetail(_ label: String, value: Double) -> some View {
+        HStack(spacing: DSSpacing.xs) {
+            Text(L10n.tr(label))
+                .foregroundStyle(.white)
+            Text(value.moneyText(currency: viewModel.balance.currency))
+                .monospacedDigit()
+        }
+        .font(DSFont.caption)
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+    }
+
     // MARK: Usage
 
     private var usageCard: some View {
-        let stats = viewModel.usage
-        let currency = viewModel.balance.currency
-
-        return VStack(alignment: .leading, spacing: DSSpacing.s) {
-            Text(L10n.tr("Statistics"))
-                .font(DSFont.section)
-
-            statRow(L10n.tr("Today"), used: stats.todayUsed, ratio: spentRatio(spent: stats.todayUsed, balance: stats.balance), color: .dsBlue)
-            statRow(L10n.tr("Total"), used: stats.totalUsed, ratio: spentRatio(spent: stats.totalUsed, balance: stats.balance), color: .dsIndigo)
-
-            balanceSplitView(currency: currency)
-
+        VStack(alignment: .leading, spacing: DSSpacing.s) {
+            HStack(alignment: .top, spacing: DSSpacing.s) {
+                statValue("Today’s estimate", amount: viewModel.usage.todayUsed, accent: .dsTeal, fill: .dsTealTint)
+                statValue("Total estimate", amount: viewModel.usage.totalUsed, accent: .dsIndigo, fill: .dsIndigoTint)
+            }
             Text(L10n.tr("Local balance snapshots; counts balance drops only."))
                 .font(DSFont.caption)
                 .foregroundColor(.secondary)
-                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .cardBackground()
+        .padding(.horizontal, DSSpacing.xs)
+        .padding(.vertical, DSSpacing.xs)
     }
 
-    private func statRow(_ title: String, used: Double, ratio: Double?, color: Color) -> some View {
+    private func statValue(_ label: String, amount: Double, accent: Color, fill: Color) -> some View {
         VStack(alignment: .leading, spacing: DSSpacing.xs) {
-            HStack {
-                Text(title)
-                    .font(DSFont.bodyMedium)
-                Spacer()
-                Text(used.moneyText(currency: viewModel.balance.currency))
-                    .font(DSFont.body)
-                    .foregroundColor(.secondary)
-                    .monospacedDigit()
-            }
-            if let ratio {
-                GeometryReader { proxy in
-                    ZStack(alignment: .leading) {
-                        Capsule()
-                            .fill(Color.secondary.opacity(0.16))
-                        Capsule()
-                            .fill(color)
-                            .frame(width: max(5, proxy.size.width * min(max(ratio, 0), 1)))
-                    }
-                }
-                .frame(height: 5)
-            }
-        }
-    }
-
-    /// Share of the current balance spent within the period.
-    private func spentRatio(spent: Double, balance: Double?) -> Double? {
-        guard let balance, balance + spent > 0 else { return nil }
-        return spent / (balance + spent)
-    }
-
-    /// Granted vs topped-up credit. Each gets its own colour dot so the
-    /// split reads without a legend.
-    @ViewBuilder
-    private func balanceSplitView(currency: String) -> some View {
-        if let granted = viewModel.balance.grantedBalance,
-           let toppedUp = viewModel.balance.toppedUpBalance {
-            HStack(spacing: DSSpacing.m) {
-                balanceSplitItem(
-                    color: .dsGreen,
-                    label: L10n.tr("Granted"),
-                    value: granted.moneyText(currency: currency)
-                )
-                balanceSplitItem(
-                    color: .dsBlue,
-                    label: L10n.tr("Topped up"),
-                    value: toppedUp.moneyText(currency: currency)
-                )
-                Spacer(minLength: 0)
-            }
-        }
-    }
-
-    private func balanceSplitItem(color: Color, label: String, value: String) -> some View {
-        HStack(spacing: DSSpacing.xs) {
-            Circle()
-                .fill(color)
-                .frame(width: 5, height: 5)
-            Text(label)
-                .font(DSFont.caption)
-                .foregroundColor(.secondary)
-            Text(value)
-                .font(DSFont.caption)
-                .foregroundColor(.secondary)
+            Text(L10n.tr(label))
+                .font(DSFont.captionMedium)
+                .foregroundColor(accent)
+            Text(amount.moneyText(currency: viewModel.balance.currency))
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(accent)
                 .monospacedDigit()
                 .lineLimit(1)
+                .minimumScaleFactor(0.75)
         }
+        .padding(DSSpacing.s)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: DSRadius.control).fill(fill))
     }
-
-    // MARK: Settings (moved to the footer gear → settings panel)
 
     // MARK: Banners
 
